@@ -1,0 +1,1576 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Planner Online - Escala de Intérpretes de Libras</title>
+    <!-- Chart.js para o Gráfico Dinâmico -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+    <!-- FIREBASE: Módulos Oficiais -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+        import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+
+        // ⚠️ ATENÇÃO: COLOQUE AQUI AS CHAVES DO FIREBASE
+        const firebaseConfig = {
+            apiKey: "AIzaSyAzopxbDg_quH--y09yCOF4_LWmknDaRi0",
+            authDomain: "interpretes-sia-ufrn.firebaseapp.com",
+            databaseURL: "https://interpretes-sia-ufrn-default-rtdb.firebaseio.com",
+            projectId: "interpretes-sia-ufrn",
+            storageBucket: "interpretes-sia-ufrn.firebasestorage.app",
+            messagingSenderId: "240113820148",
+            appId: "1:240113820148:web:44858c03f665ee983f19a1"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const database = getDatabase(app);
+        const auth = getAuth(app);
+
+        window.db = database;
+        window.dbRef = ref;
+        window.dbSet = set;
+        window.dbOnValue = onValue;
+        window.auth = auth;
+        window.signInWithEmailAndPassword = signInWithEmailAndPassword;
+        window.signOut = signOut;
+
+        // 📋 E-mails com permissão de GESTOR
+        const adminEmails = [
+            "anderson.cipriano@ufrn.br",
+            "coortils@sia.ufrn.br"
+        ];
+        window.activeFirebaseListener = null;
+
+        // Monitora o login
+        onAuthStateChanged(auth, (user) => {
+            const publicView = document.getElementById('publicView');
+            const appContent = document.getElementById('appContent');
+            const userInfo = document.getElementById('userInfo');
+            const loginModal = document.getElementById('loginModalOverlay');
+
+            if (user) {
+                // LOGADO: Esconde a visão pública e mostra o App completo
+                loginModal.style.display = 'none';
+                publicView.style.display = 'none';
+                appContent.style.display = 'block';
+                
+                const userEmail = user.email.toLowerCase();
+                
+                if (adminEmails.includes(userEmail)) {
+                    document.body.classList.remove('modo-leitura');
+                    userInfo.innerHTML = `👤 <b>Gestor:</b> ${user.email}`;
+                } else {
+                    document.body.classList.add('modo-leitura');
+                    userInfo.innerHTML = `👁️ <b>Intérprete (Leitura):</b> ${user.email}`;
+                }
+            } else {
+                // DESLOGADO: Mostra a Visão Pública (Escala Parcial)
+                appContent.style.display = 'none';
+                publicView.style.display = 'block';
+                loginModal.style.display = 'none'; // Garante que o modal não fique preso na tela
+            }
+        });
+
+        // Carrega dados independente de estar logado ou não
+        window.loadFromFirebase = function() {
+            const year = document.getElementById("yearInputPublic")?.value || document.getElementById("yearInput")?.value || "2026";
+            const month = document.getElementById("monthSelectPublic")?.value || document.getElementById("monthSelect")?.value || "6";
+            const path = `escalas/${year}_${month}`;
+            const dataRef = ref(database, path);
+
+            window.dbOnValue(dataRef, (snapshot) => {
+                const data = snapshot.val();
+                if (data) {
+                    window.scheduleData = data.scheduleData || {};
+                    if (data.interpretes && data.interpretes.length > 0) window.interpretes = data.interpretes;
+                    if (data.interpreterTurnos) window.interpreterTurnos = data.interpreterTurnos;
+                    if (data.baseStartDate) {
+                        window.baseStartDate = new Date(data.baseStartDate);
+                        const startInput = document.getElementById("startDateInput");
+                        if (startInput) startInput.valueAsDate = window.baseStartDate;
+                    }
+                } else {
+                    window.initScheduleData();
+                }
+                window.updateDates();
+                window.renderPublicTable(); 
+                window.renderTable();       
+                window.updateChart();
+            });
+        };
+        
+        // Dispara o carregamento inicial
+        setTimeout(() => loadFromFirebase(), 150);
+    </script>
+
+    <style>
+        :root {
+            --primary: #1F4E79;
+            --primary-light: #F2F6FA;
+            --border: #D9D9D9;
+            --atendimento: #D4EDDA;
+            --estudo: #FFF3CD;
+            --planejamento: #FFE8D6;
+            --evento: #CCE5FF;
+            --traducao: #E8D8F8;
+            --disciplinas: #F8D7DA;
+            --reuniao: #D1E7DD;
+            --projeto: #B8E2F2;
+            --outros: #E2E3E5;
+            --nao-atendimento: #f5b7b1; 
+            --substituicao: #fdebd0; 
+            --ferias: #d4e6f1; 
+        }
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background-color: #f7f9fa; color: #333; font-size: 14px; }
+        .container { max-width: 1550px; margin: 0 auto; background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+
+        /* REGRAS DO MODO LEITURA */
+        body.modo-leitura .admin-only { display: none !important; }
+        body.modo-leitura select, 
+        body.modo-leitura input:not(.login-input), 
+        body.modo-leitura textarea {
+            pointer-events: none; border: none !important; background: transparent !important; 
+            appearance: none; -webkit-appearance: none; color: #000 !important; font-weight: 600; resize: none;
+        }
+        body.modo-leitura .partner-btn { border: none; background: transparent; cursor: default; }
+        body.modo-leitura .partner-btn span:last-child { display: none; }
+        body.modo-leitura .demand-card { box-shadow: none; border-color: #e0e0e0; }
+
+        header { text-align: center; background: var(--primary); color: #fff; padding: 20px; border-radius: 6px; margin-bottom: 20px; position: relative; }
+        header h1 { margin: 0; font-size: 26px; }
+        header p { margin: 5px 0 0; opacity: 0.9; font-style: italic; font-size: 14.5px; }
+        
+        .auth-bar { position: absolute; top: 15px; right: 20px; display: flex; align-items: center; gap: 10px; }
+        .user-info { font-size: 12.5px; background: rgba(255,255,255,0.15); padding: 6px 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2); }
+        .btn-logout { background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12.5px; font-weight: bold; }
+
+        .date-config-bar { display: flex; align-items: center; justify-content: center; gap: 15px; background: var(--primary-light); padding: 14px 20px; border-radius: 6px; margin-bottom: 20px; border: 1px solid var(--border); flex-wrap: wrap; }
+        .date-config-bar label { font-weight: bold; color: var(--primary); font-size: 15px; }
+        .date-config-bar input, .date-config-bar select { padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 15px; }
+        .controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 15px; flex-wrap: wrap; }
+        
+        .nav-weeks button, .btn-pdf, .btn-manage, .btn-filter { padding: 11px 18px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: all 0.2s; font-size: 14px; }
+        .nav-weeks button { background: #eef2f5; color: #555; margin-right: 5px; }
+        .nav-weeks button.active { background: var(--primary); color: #fff; }
+        .btn-pdf { background: #28a745; color: white; }
+        .btn-pdf:hover { background: #218838; }
+        .btn-manage { background: #17a2b8; color: white; }
+        .btn-manage:hover { background: #138496; }
+        .btn-filter { background: #6f42c1; color: white; }
+        .btn-filter:hover { background: #593196; }
+        
+        .legend { display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap; background: var(--primary-light); padding: 14px; border-radius: 4px; font-size: 14.5px; }
+        .legend-item { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+        .box { width: 20px; height: 14px; border-radius: 2px; border: 1px solid #ccc; }
+        
+        table { width: 100%; border-collapse: collapse; margin-bottom: 25px; }
+        th, td { border: 1px solid var(--border); padding: 10px; text-align: center; vertical-align: top; }
+        th { background: var(--primary); color: white; font-size: 14.5px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .th-date { display: block; font-size: 12.5px; font-weight: normal; opacity: 0.9; margin-top: 3px; }
+        .turno-row { background: #f1f1f1; font-weight: bold; color: var(--primary); text-align: left; padding-left: 14px; font-size: 15px; }
+        .interpreter-cell { font-weight: bold; background: #fafafa; text-align: left; width: 12%; font-size: 14.5px; color: #222; }
+        .hours-cell { font-weight: bold; background: #fdfdfd; width: 8%; font-size: 14px; color: #333; }
+        
+        .demands-list { display: flex; flex-direction: column; gap: 8px; }
+        .demand-card { border: 1px solid #ccc; border-radius: 6px; padding: 8px; background: #fff; position: relative; box-shadow: 0 1px 3px rgba(0,0,0,0.06); height: auto; min-height: fit-content; }
+        
+        /* Estilos Visão Pública */
+        .demand-card-public { border: 1px solid #ccc; border-left: 4px solid var(--primary); border-radius: 6px; padding: 10px; background: #fff; margin-bottom: 8px; text-align: left; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+        .demand-card-public.atend { background-color: #f4fbf1; border-left-color: #2e7d32; }
+        .demand-card-public.ferias { background-color: #ebf5fb; border-left-color: #2980b9; }
+        .demand-card-public.naoatend { background-color: #fdf2f2; border-left-color: #c0392b; }
+
+        .demand-header { display: flex; gap: 6px; margin-bottom: 6px; }
+        select { flex: 1; padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; font-weight: 600; color: #222; }
+        select[data-val="Atendimento"] { background-color: var(--atendimento); }
+        select[data-val="Estudo"] { background-color: var(--estudo); }
+        select[data-val="Planejamento"] { background-color: var(--planejamento); }
+        select[data-val="Evento"] { background-color: var(--evento); }
+        select[data-val="Tradução"] { background-color: var(--traducao); }
+        select[data-val="Disciplinas"] { background-color: var(--disciplinas); }
+        select[data-val="Reunião"] { background-color: var(--reuniao); }
+        select[data-val="Projeto"] { background-color: var(--projeto); }
+        select[data-val="Outros"] { background-color: var(--outros); }
+        select[data-val="Não Atendimento"] { background-color: var(--nao-atendimento); }
+        select[data-val="Substituição"] { background-color: var(--substituicao); }
+        select[data-val="Férias"] { background-color: var(--ferias); }
+        
+        .demand-card[data-type="Não Atendimento"] { background-color: #fdf2f2 !important; border-left: 4px solid #c0392b !important; }
+        .demand-card[data-type="Substituição"] { background-color: #fef9e7 !important; border-left: 4px solid #d35400 !important; }
+        .demand-card[data-type="Férias"] { background-color: #ebf5fb !important; border-left: 4px solid #2980b9 !important; }
+
+        .duration-select { width: 70px; padding: 6px; font-size: 13px; background: #f9f9f9; }
+        input[type="text"], input[type="time"] { width: 95%; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13.5px; text-align: left; margin-bottom: 5px; box-sizing: border-box; color: #222; font-weight: 500; }
+        .time-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #444; margin-bottom: 5px; }
+        .time-row input[type="time"] { width: 48%; margin-bottom: 0; padding: 4px; font-size: 12.5px; }
+        
+        .btn-remove { background: #ff4d4d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 4px 10px; float: right; margin-top: 3px; font-weight: bold; }
+        .btn-add { background: var(--primary); color: white; border: none; border-radius: 4px; padding: 7px 10px; font-size: 13.5px; cursor: pointer; margin-top: 8px; width: 100%; font-weight: bold; }
+        .btn-add:hover { opacity: 0.9; }
+        
+        /* Modal e Login */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); justify-content: center; align-items: center; z-index: 2000; }
+        .modal { background: white; padding: 25px; border-radius: 8px; width: 500px; max-width: 90%; box-shadow: 0 4px 10px rgba(0,0,0,0.2); max-height: 85vh; overflow-y: auto; font-size: 14px; }
+        .modal h3 { margin-top: 0; color: var(--primary); font-size: 18px; }
+        .modal-login { background: white; padding: 30px; border-radius: 8px; width: 380px; max-width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.3); text-align: center; }
+        .login-input { width: 100%; padding: 10px; margin-bottom: 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 14.5px; box-sizing: border-box; }
+        .btn-submit-login { background: var(--primary); color: white; padding: 12px; width: 100%; border: none; border-radius: 4px; font-size: 15px; font-weight: bold; cursor: pointer; }
+        
+        .interp-item-manage { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
+        .interp-item-manage input { flex: 1; padding: 8px; font-size: 14px; }
+        .btn-danger { background: #dc3545; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        .btn-close-modal { background: #6c757d; color: white; border: none; padding: 10px 18px; border-radius: 4px; cursor: pointer; margin-top: 15px; font-weight: bold; font-size: 14px; }
+        
+        .filter-group { margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .filter-group h4 { margin: 0 0 8px 0; color: var(--primary); font-size: 15px; }
+        .filter-options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font-size: 14px; }
+        .filter-options label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 500; }
+        
+        .balance-section { background: #fff; border: 1px solid var(--border); border-left: 5px solid var(--primary); padding: 18px 22px; border-radius: 6px; margin-bottom: 30px; }
+        .balance-section h3 { margin-top: 0; color: var(--primary); font-size: 17px; }
+        .balance-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; margin-top: 12px; }
+        .balance-card { padding: 10px 14px; border-radius: 6px; font-size: 14px; display: flex; justify-content: space-between; align-items: center; }
+        .status-ok { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
+        .status-high { background: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
+        .status-low { background: #fff8e1; color: #f57f17; border: 1px solid #ffe082; }
+        
+        .chart-section { margin-top: 30px; padding-top: 20px; border-top: 2px solid #eee; }
+        .chart-container { max-width: 650px; margin: 0 auto; }
+        .pdf-hidden { display: none !important; }
+        .obs-print-display { display: none; }
+
+        @media print {
+            body.printing-report #currentWeekTitle, body.printing-report #plannerTable, body.printing-report .balance-section, body.printing-report .chart-section { display: none !important; }
+            body.printing-report .container { display: none !important; }
+            body.printing-report #reportModalOverlay { display: block !important; position: static !important; background: white !important; width: 100% !important; height: auto !important; overflow: visible !important; }
+            body.printing-report .modal { box-shadow: none !important; max-width: 100% !important; width: 100% !important; padding: 0 !important; max-height: none !important; overflow: visible !important; }
+            #reportTable { page-break-inside: auto; }
+            #reportTable tr { page-break-inside: avoid; page-break-after: auto; }
+            #reportTable thead { display: table-header-group; }
+            body.printing-report button, body.printing-report .btn-close-modal, body.printing-report .btn-pdf { display: none !important; }
+            .obs-edit-input { display: none !important; }
+            .obs-print-display { display: block !important; border: none !important; background: transparent !important; padding: 0 !important; }
+            body { background: white; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            textarea { border: none !important; background: transparent !important; resize: none !important; overflow: visible !important; white-space: pre-wrap !important; word-break: break-word !important; font-weight: 600 !important; box-sizing: border-box !important; }
+            .container { box-shadow: none; padding: 0; max-width: 100%; }
+            .controls, .chart-section, .balance-section, .btn-add, .btn-remove, .date-config-bar, .btn-manage, .btn-filter { display: none !important; }
+            .demand-card { border: 1px solid #ccc !important; padding: 6px !important; margin-bottom: 6px !important; border-radius: 6px !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+            select, input[type="text"], input[type="time"] { border: none !important; background: transparent !important; appearance: none !important; -webkit-appearance: none !important; font-weight: 600; color: #000 !important; }
+            select { padding: 2px 4px !important; border-radius: 3px !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+            
+            select[data-val="Atendimento"] { background-color: var(--atendimento) !important; }
+            select[data-val="Estudo"] { background-color: var(--estudo) !important; }
+            select[data-val="Planejamento"] { background-color: var(--planejamento) !important; }
+            select[data-val="Evento"] { background-color: var(--evento) !important; }
+            select[data-val="Tradução"] { background-color: var(--traducao) !important; }
+            select[data-val="Disciplinas"] { background-color: var(--disciplinas) !important; }
+            select[data-val="Reunião"] { background-color: var(--reuniao) !important; }
+            select[data-val="Projeto"] { background-color: var(--projeto) !important; }
+            select[data-val="Outros"] { background-color: var(--outros) !important; }
+            select[data-val="Não Atendimento"] { background-color: var(--nao-atendimento) !important; }
+            select[data-val="Substituição"] { background-color: var(--substituicao) !important; }
+            select[data-val="Férias"] { background-color: var(--ferias) !important; }
+
+            .demand-card[data-type="Atendimento"] { background-color: #f4fbf1 !important; border-left: 4px solid #2e7d32 !important; }
+            .demand-card[data-type="Estudo"] { background-color: #fffdf5 !important; border-left: 4px solid #f57f17 !important; }
+            .demand-card[data-type="Planejamento"] { background-color: #fff8f5 !important; border-left: 4px solid #e65100 !important; }
+            .demand-card[data-type="Evento"] { background-color: #f0f7ff !important; border-left: 4px solid #1976d2 !important; }
+            .demand-card[data-type="Tradução"] { background-color: #f8f4fa !important; border-left: 4px solid #7b1fa2 !important; }
+            .demand-card[data-type="Disciplinas"] { background-color: #fff5f8 !important; border-left: 4px solid #c2185b !important; }
+            .demand-card[data-type="Reunião"] { background-color: #f3f9f3 !important; border-left: 4px solid #388e3c !important; }
+            .demand-card[data-type="Projeto"] { background-color: #e0f7fa !important; border-left: 4px solid #00838f !important; }
+            .demand-card[data-type="Outros"] { background-color: #f9f9f9 !important; border-left: 4px solid #616161 !important; }
+            .demand-card[data-type="Não Atendimento"] { background-color: #fdf2f2 !important; border-left: 4px solid #c0392b !important; }
+            .demand-card[data-type="Substituição"] { background-color: #fef9e7 !important; border-left: 4px solid #d35400 !important; }
+            .demand-card[data-type="Férias"] { background-color: #ebf5fb !important; border-left: 4px solid #2980b9 !important; }
+
+            .pdf-hidden { display: none !important; }
+            .partner-dropdown { display: none !important; }
+            .partner-btn { background: transparent !important; border: 1px solid #ccc !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- === VISÃO PÚBLICA (ESCALA PARCIAL) === -->
+<div class="container" id="publicView" style="display: block;">
+    <header style="display: flex; align-items: center; justify-content: center; gap: 20px; padding: 20px 25px;">
+        <div style="background: white; padding: 8px 12px; border-radius: 6px; display: flex; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.15);">
+            <!-- Ajuste o src da imagem conforme o seu projeto -->
+            <img src="images (1).jpg" alt="Logo SIA UFRN" style="height: 55px;">
+        </div>
+        <div style="text-align: center;">
+            <div style="font-size: 16px; font-weight: 600; text-transform: uppercase;">Comitê de Serviços de Tradução e Interpretação (SIA/UFRN)</div>
+            <h1 style="margin: 0; font-size: 26px;">Escala Parcial de Atendimentos</h1>
+        </div>
+        <div class="auth-bar">
+            <!-- Botão que abre a janela de login -->
+            <button style="background: rgba(255,255,255,0.2); color: white; border: 1px solid white; padding: 8px 14px; border-radius: 4px; font-weight: bold; cursor: pointer; transition: 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'" onclick="document.getElementById('loginModalOverlay').style.display='flex'">🔒 Acesso Restrito (Equipe)</button>
+        </div>
+    </header>
+
+    <div style="text-align: center; margin-bottom: 20px;">
+        <h3 id="currentWeekTitlePublic" style="color: var(--primary); margin: 0 0 10px 0; font-size: 18px;">Semana Atual</h3>
+        
+        <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 10px;">
+            <button id="btn-pub-w1" onclick="changeWeek(1)" style="padding: 8px 14px; cursor: pointer; border-radius: 4px; border: 1px solid var(--primary); background: var(--primary); color: white; font-weight: bold; transition: 0.2s;">1ª Semana</button>
+            <button id="btn-pub-w2" onclick="changeWeek(2)" style="padding: 8px 14px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0; color: #333; font-weight: bold; transition: 0.2s;">2ª Semana</button>
+            <button id="btn-pub-w3" onclick="changeWeek(3)" style="padding: 8px 14px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0; color: #333; font-weight: bold; transition: 0.2s;">3ª Semana</button>
+            <button id="btn-pub-w4" onclick="changeWeek(4)" style="padding: 8px 14px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0; color: #333; font-weight: bold; transition: 0.2s;">4ª Semana</button>
+        </div>
+        
+        <!-- Controles de data visíveis para navegação pública -->
+        <div style="margin-top: 15px; display: flex; justify-content: center; gap: 10px; align-items: center;">
+            <label style="font-weight: bold; color: var(--primary);">Mês:</label>
+            <select id="monthSelectPublic" onchange="syncDatesPublic()" style="padding: 6px; border-radius: 4px;">
+                <option value="0">Janeiro</option><option value="1">Fevereiro</option><option value="2">Março</option>
+                <option value="3">Abril</option><option value="4">Maio</option><option value="5">Junho</option>
+                <option value="6" selected>Julho</option><option value="7">Agosto</option><option value="8">Setembro</option>
+                <option value="9">Outubro</option><option value="10">Novembro</option><option value="11">Dezembro</option>
+            </select>
+            <label style="font-weight: bold; color: var(--primary);">Ano:</label>
+            <input type="number" id="yearInputPublic" value="2026" style="width: 70px; padding: 6px; border-radius: 4px;" onchange="syncDatesPublic()">
+        </div>
+    </div>
+
+    <!-- Tabela Pública Simplificada -->
+    <table id="publicTable">
+        <thead>
+            <tr id="headerRowPublic">
+                <th>Turno / Intérprete</th>
+                <th style="width: 17%;">Segunda <span class="th-date" id="date-seg-pub"></span></th>
+                <th style="width: 17%;">Terça <span class="th-date" id="date-ter-pub"></span></th>
+                <th style="width: 17%;">Quarta <span class="th-date" id="date-qua-pub"></span></th>
+                <th style="width: 17%;">Quinta <span class="th-date" id="date-qui-pub"></span></th>
+                <th style="width: 17%;">Sexta <span class="th-date" id="date-sex-pub"></span></th>
+            </tr>
+        </thead>
+        <tbody id="publicTableBody">
+        </tbody>
+    </table>
+
+    <div style="background: #fff3cd; border-left: 5px solid #ffc107; padding: 18px; margin-top: 25px; border-radius: 4px; font-size: 14.5px; color: #555; line-height: 1.5;">
+        <strong style="color: #856404; font-size: 15.5px;">⚠️ Observação Importante:</strong><br>
+        Esta se trata de uma escala parcial exibindo estritamente as informações pertinentes ao atendimento de mediação linguística, feriados e suspensões institucionais. Outras atividades internas da equipe (estudos, reuniões, etc.) não estão listadas aqui. <br><br>
+        Para mais informações ou solicitações específicas, envie um e-mail solicitando a escala atual para: 
+        <a href="mailto:coordtils@sia.ufrn.br" style="font-weight: bold; color: var(--primary); text-decoration: none;">coordtils@sia.ufrn.br</a>
+    </div>
+</div>
+
+<!-- === MODAL TELA DE LOGIN (SOBREPOSTA) === -->
+<div class="modal-overlay" id="loginModalOverlay">
+    <div class="modal-login">
+        <div style="background: var(--primary-light); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 15px auto;">
+            <span style="font-size: 28px;">🔐</span>
+        </div>
+        <h3 style="color: var(--primary); margin: 0 0 5px 0; font-size: 20px;">Área da Equipe</h3>
+        <p style="font-size: 13.5px; color: #666; margin-bottom: 20px;">Insira suas credenciais para gerenciar ou visualizar a escala interna.</p>
+        
+        <input type="email" id="loginEmail" class="login-input" placeholder="E-mail UFRN">
+        <input type="password" id="loginPassword" class="login-input" placeholder="Senha">
+        
+        <button class="btn-submit-login" onclick="fazerLogin()">Entrar</button>
+        <button onclick="document.getElementById('loginModalOverlay').style.display='none'" style="margin-top: 15px; background: transparent; border: none; color: #777; cursor: pointer; text-decoration: underline;">Voltar para Visualização Pública</button>
+    </div>
+</div>
+
+<!-- === CONTEÚDO PRINCIPAL DO APP PRIVADO === -->
+<div class="container" id="appContent" style="display: none;">
+    <header style="display: flex; align-items: center; justify-content: center; gap: 20px; padding: 20px 25px;">
+        <div style="background: white; padding: 8px 12px; border-radius: 6px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 4px rgba(0,0,0,0.15);">
+            <img src="images (1).jpg" alt="Logo SIA UFRN" style="height: 55px; width: auto; object-fit: contain;">
+        </div>
+        <div style="text-align: center;">
+            <div style="font-size: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.95; margin-bottom: 6px;">Comitê de Serviços de Tradução e Interpretação de Libras (SIA/UFRN)</div>
+            <h1 style="margin: 0; font-size: 26px;">Escala Interna Completa</h1>
+            <p style="margin: 5px 0 0; opacity: 0.9; font-style: italic; font-size: 14.5px;">Gestão de Escalas, Datas, Locais, Horários, Duplas/Trios e Múltiplas Demandas</p>
+        </div>
+        <div class="auth-bar">
+            <span class="user-info" id="userInfo"></span>
+            <button class="btn-logout" onclick="fazerLogout()">Sair e Voltar ao Público</button>
+        </div>
+    </header>
+
+    <div class="date-config-bar">
+        <label for="monthSelect">Mês:</label>
+        <select id="monthSelect" onchange="syncDatesPrivate()">
+            <option value="0">Janeiro</option><option value="1">Fevereiro</option><option value="2">Março</option>
+            <option value="3">Abril</option><option value="4">Maio</option><option value="5">Junho</option>
+            <option value="6" selected>Julho</option><option value="7">Agosto</option><option value="8">Setembro</option>
+            <option value="9">Outubro</option><option value="10">Novembro</option><option value="11">Dezembro</option>
+        </select>
+        <label for="yearInput">Ano:</label>
+        <input type="number" id="yearInput" value="2026" min="2024" max="2035" style="width: 85px;" onchange="syncDatesPrivate()">
+        <label for="startDateInput">Data Inicial (S1-Seg):</label>
+        <input type="date" id="startDateInput" onchange="updateDates(); saveToFirebase();">
+    </div>
+
+    <div class="controls">
+        <div class="nav-weeks" id="weekNav">
+            <button onclick="changeWeek(1)" class="active" id="btn-w1">Semana 1</button>
+            <button onclick="changeWeek(2)" id="btn-w2">Semana 2</button>
+            <button onclick="changeWeek(3)" id="btn-w3">Semana 3</button>
+            <button onclick="changeWeek(4)" id="btn-w4">Semana 4</button>
+        </div>
+        <div>
+            <button class="btn-vacation-range admin-only" style="background: #2980b9; color: white; border: none; padding: 11px 18px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 5px; font-size: 14px;" onclick="openVacationRangeModal()">🌴 Programar Férias</button>
+            <button class="btn-holiday admin-only" style="background: #e74c3c; color: white; border: none; padding: 11px 18px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 5px; font-size: 14px;" onclick="openHolidayModal()">🛑 Feriado/Suspensão</button>
+            <button class="btn-report" style="background: #e67e22; color: white; border: none; padding: 11px 18px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 5px; font-size: 14px;" onclick="openMonthlyReportModal()">📋 Relatórios</button>
+            <button class="btn-filter" onclick="openPdfModal()">🎯 Filtro PDF</button>
+            <button class="btn-manage admin-only" onclick="openModal()">👥 Gerenciar Equipe</button>
+            <button class="btn-xlsx" style="background: #1D6F42; color: white; border: none; padding: 11px 18px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 5px; font-size: 14px;" onclick="exportToExcel()">📊 Excel (.xlsx)</button>
+            <button class="btn-gcal" style="background: #4285F4; color: white; border: none; padding: 11px 18px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 5px; font-size: 14px;" onclick="exportToGoogleCalendar()">📅 Agenda (.ics)</button>
+            <button class="btn-reset admin-only" style="background: #dc3545; color: white; border: none; padding: 11px 18px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 5px; font-size: 14px;" onclick="resetPlannerData()">🗑️ Limpar Mês</button>
+            <button class="btn-pdf" onclick="window.print()">🖨️ PDF Semana</button>
+        </div>
+    </div>
+
+    <div style="background: var(--primary-light); padding: 16px; border-radius: 6px; margin-bottom: 20px; border: 1px solid var(--border);">
+        <div style="font-weight: bold; font-size: 14px; color: var(--primary); margin-bottom: 10px;">🏷️ Tipos de Demanda:</div>
+        <div class="legend" style="background: transparent; padding: 0; margin-bottom: 12px;">
+            <div class="legend-item"><span class="box" style="background: var(--atendimento)"></span> Atendimento</div>
+            <div class="legend-item"><span class="box" style="background: var(--estudo)"></span> Estudo</div>
+            <div class="legend-item"><span class="box" style="background: var(--planejamento)"></span> Planejamento</div>
+            <div class="legend-item"><span class="box" style="background: var(--evento)"></span> Evento</div>
+            <div class="legend-item"><span class="box" style="background: var(--traducao)"></span> Tradução</div>
+            <div class="legend-item"><span class="box" style="background: var(--disciplinas)"></span> Disciplinas</div>
+            <div class="legend-item"><span class="box" style="background: var(--reuniao)"></span> Reunião</div>
+            <div class="legend-item"><span class="box" style="background: var(--projeto)"></span> Projeto</div>
+            <div class="legend-item"><span class="box" style="background: var(--outros)"></span> Outros</div>
+            <div class="legend-item"><span class="box" style="background: var(--nao-atendimento)"></span> Não Atendimento</div>
+            <div class="legend-item"><span class="box" style="background: var(--substituicao)"></span> Substituição</div>
+            <div class="legend-item"><span class="box" style="background: var(--ferias)"></span> Férias</div>
+        </div>
+        <div style="font-weight: bold; font-size: 14px; color: var(--primary); margin-bottom: 10px; border-top: 1px dashed #ccc; padding-top: 12px;">🎨 Áreas do Conhecimento:</div>
+        <div class="legend" style="background: transparent; padding: 0; margin-bottom: 0;">
+            <div class="legend-item"><span class="box" style="background: #EFE6FA; border: 1px solid #c8b0e0;"></span> 🧠 Ciências Humanas</div>
+            <div class="legend-item"><span class="box" style="background: #E6F0FA; border: 1px solid #b0c8e0;"></span> 📐 Ciências Exatas e da Terra</div>
+            <div class="legend-item"><span class="box" style="background: #E6F8E8; border: 1px solid #b0e0b8;"></span> 🧬 Ciências Biológicas e da Saúde</div>
+            <div class="legend-item"><span class="box" style="background: #FFE6E6; border: 1px solid #e0b0b0;"></span> ⚖️ Ciências Sociais Aplicadas</div>
+            <div class="legend-item"><span class="box" style="background: #FFF3CD; border: 1px solid #e0d8b0;"></span> 🌱 Ciências Agrárias</div>
+            <div class="legend-item"><span class="box" style="background: #E6FAFA; border: 1px solid #b0e0b0;"></span> 💻 Engenharia, Ciência e Tecnologia</div>
+            <div class="legend-item"><span class="box" style="background: #FDE2E4; border: 1px solid #e0b0c0;"></span> 🎨 Linguística, Letras e Artes</div>
+        </div>
+    </div>
+
+    <h3 id="currentWeekTitle" style="color: var(--primary); margin-bottom: 12px; font-size: 18px;">Escala Atual: Semana 1</h3>
+    
+    <table id="plannerTable">
+        <thead>
+            <tr id="headerRow">
+                <th id="col-head-interp">Turno / Intérprete</th>
+                <th id="col-head-hours">Carga Semanal</th>
+                <th id="col-head-seg" style="width: 16%;">Segunda <span class="th-date" id="date-seg"></span></th>
+                <th id="col-head-ter" style="width: 16%;">Terça <span class="th-date" id="date-ter"></span></th>
+                <th id="col-head-qua" style="width: 16%;">Quarta <span class="th-date" id="date-qua"></span></th>
+                <th id="col-head-qui" style="width: 16%;">Quinta <span class="th-date" id="date-qui"></span></th>
+                <th id="col-head-sex" style="width: 16%;">Sexta <span class="th-date" id="date-sex"></span></th>
+            </tr>
+        </thead>
+        <tbody id="tableBody">
+        </tbody>
+    </table>
+
+    <div class="balance-section admin-only">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;">
+            <h3 style="margin: 0; color: var(--primary);">⚖️ Balanceamento da Equipe (Semanal)</h3>
+            <button onclick="resetBalanceOverrides()" style="background: #6c757d; color: white; border: none; padding: 7px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold;">🔄 Recalcular da Tabela</button>
+        </div>
+        <div class="balance-list" id="balanceList"></div>
+    </div>
+
+    <div class="chart-section admin-only">
+        <h3 style="color: var(--primary); text-align: center; font-size: 18px;">📊 Gráfico Consolidado do Mês (Horas Totais)</h3>
+        <div class="chart-container">
+            <canvas id="demandChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- ========================================== -->
+<!-- MODAIS DO SISTEMA PRIVADO -->
+<!-- ========================================== -->
+
+<div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+        <h3>👥 Gerenciar Equipe de Intérpretes</h3>
+        <p style="font-size: 14px; color: #555;">Inclua, altere ou exclua os nomes da equipe abaixo:</p>
+        <div id="interpretersListManage"></div>
+        <button class="btn-add" style="margin-top: 10px;" onclick="addInterpreter()">+ Incluir Novo Intérprete</button>
+        <div style="text-align: right;">
+            <button class="btn-close-modal" onclick="closeModal()">Salvar & Fechar</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="pdfModalOverlay">
+    <div class="modal">
+        <h3>🎯 Selecionar Linhas e Colunas (PDF)</h3>
+        <div class="filter-group">
+            <h4>📊 Colunas Gerais</h4>
+            <div class="filter-options"><label><input type="checkbox" id="chk-col-hours" checked> Carga Semanal (Total de Horas)</label></div>
+        </div>
+        <div class="filter-group">
+            <h4>📅 Dias da Semana (Colunas)</h4>
+            <div class="filter-options">
+                <label><input type="checkbox" id="chk-col-seg" checked> Segunda</label>
+                <label><input type="checkbox" id="chk-col-ter" checked> Terça</label>
+                <label><input type="checkbox" id="chk-col-qua" checked> Quarta</label>
+                <label><input type="checkbox" id="chk-col-qui" checked> Quinta</label>
+                <label><input type="checkbox" id="chk-col-sex" checked> Sexta</label>
+            </div>
+        </div>
+        <div class="filter-group">
+            <h4>⏰ Turnos (Linhas)</h4>
+            <div class="filter-options">
+                <label><input type="checkbox" id="chk-turno-manha" checked> Manhã</label>
+                <label><input type="checkbox" id="chk-turno-tarde" checked> Tarde</label>
+                <label><input type="checkbox" id="chk-turno-noite" checked> Noite</label>
+            </div>
+        </div>
+        <div class="filter-group">
+            <h4>🤟 Intérpretes (Linhas)</h4>
+            <div class="filter-options" id="filterInterpretersList"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 15px;">
+            <button class="btn-close-modal" style="margin-top: 0;" onclick="closePdfModal()">Cancelar</button>
+            <button class="btn-pdf" onclick="generateCustomPdf()">🖨️ Imprimir / Salvar</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="reportModalOverlay">
+    <div class="modal" style="width: 880px; max-width: 98%;">
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid var(--primary); padding-bottom: 10px; margin-bottom: 15px;">
+            <h3 style="margin: 0; color: var(--primary);">📋 Relatório de Demandas</h3>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <select id="reportInterpreterFilter" style="padding: 8px; border-radius: 4px; border: 1px solid #ccc; font-weight: bold; font-size: 14px;" onchange="openMonthlyReportModal()"></select>
+                <button class="btn-pdf" onclick="printMonthlyReport()">🖨️ Salvar PDF</button>
+            </div>
+        </div>
+
+        <div id="reportPrintArea">
+            <div style="display: flex; align-items: center; justify-content: center; gap: 15px; margin-bottom: 20px;">
+                <img src="images (1).jpg" alt="Logo SIA UFRN" style="height: 55px; width: auto; object-fit: contain;">
+                <div style="text-align: left;">
+                    <h2 style="color: var(--primary); margin: 0; font-size: 19px;">Comitê de Serviços (SIA/UFRN)</h2>
+                    <h4 id="reportMonthTitle" style="margin: 3px 0 0 0; font-weight: normal; color: #555; font-size: 14px;">Relatório Mensal</h4>
+                </div>
+            </div>
+
+            <div id="reportSummaryCards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 20px;"></div>
+
+            <div style="background: #fafafa; border: 1px solid #ddd; border-radius: 6px; padding: 15px; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0; color: var(--primary); text-align: center; font-size: 15px;">📊 Distribuição Mensal</h4>
+                <div style="max-width: 550px; margin: 0 auto; height: 260px;"><canvas id="reportChart"></canvas></div>
+            </div>
+
+            <h4 style="color: var(--primary); margin-bottom: 8px; font-size: 15px;">📑 Detalhamento (Agrupado)</h4>
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 15px;" id="reportTable">
+                <thead>
+                    <tr style="background: var(--primary); color: white; font-size: 12.5px;">
+                        <th style="padding: 7px;">Data(s)</th>
+                        <th style="padding: 7px;">Sem.</th>
+                        <th style="padding: 7px;">Turno</th>
+                        <th style="padding: 7px;">Tipo</th>
+                        <th style="padding: 7px;">Demanda / Atividade</th>
+                        <th style="padding: 7px;">Equipe</th>
+                        <th style="padding: 7px;">Local</th>
+                        <th style="padding: 7px;">Horário</th>
+                        <th style="padding: 7px;">Horas</th>
+                    </tr>
+                </thead>
+                <tbody id="reportTableBody"></tbody>
+            </table>
+        </div>
+        <div style="text-align: right; border-top: 1px solid #eee; padding-top: 12px; margin-top: 10px;">
+            <button class="btn-close-modal" onclick="closeMonthlyReportModal()">Fechar Relatório</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="holidayModalOverlay">
+    <div class="modal">
+        <h3 style="color: #c0392b;">🛑 Registrar Feriado ou Suspensão</h3>
+        <p style="font-size: 14px; color: #555;">Aplica uma suspensão (ex: Feriado) para <b>todos os intérpretes</b> no dia selecionado desta semana.</p>
+        <div style="margin-bottom: 15px;">
+            <label style="display: block; font-size: 14px; font-weight: bold; margin-bottom: 6px; color: var(--primary);">Dia da Semana:</label>
+            <select id="holidayDay" style="width: 100%; padding: 9px; font-size: 14.5px; border: 1px solid #ccc; border-radius: 4px;">
+                <option value="seg">Segunda-feira</option><option value="ter">Terça-feira</option>
+                <option value="qua">Quarta-feira</option><option value="qui">Quinta-feira</option>
+                <option value="sex">Sexta-feira</option>
+            </select>
+        </div>
+        <div style="margin-bottom: 15px;">
+            <label style="display: block; font-size: 14px; font-weight: bold; margin-bottom: 6px; color: var(--primary);">Motivo (ex: Feriado, Recesso):</label>
+            <input type="text" id="holidayReason" placeholder="Feriado Nacional..." style="width: 100%; padding: 9px; font-size: 14.5px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 20px;">
+            <button class="btn-close-modal" style="margin-top: 0;" onclick="closeHolidayModal()">Cancelar</button>
+            <div>
+                <button style="background: #6c757d; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 5px; font-size: 14px;" onclick="clearHoliday()">🧹 Limpar Dia</button>
+                <button style="background: #e74c3c; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 14px;" onclick="applyHoliday()">🛑 Aplicar a Todos</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="vacationRangeModalOverlay">
+    <div class="modal">
+        <h3 style="color: #2980b9;">🌴 Programar Férias</h3>
+        <p style="font-size: 14px; color: #555;">Selecione o intérprete e intervalo de datas. Aplica automaticamente em todas as semanas do mês atual.</p>
+        <div style="margin-bottom: 12px;">
+            <label style="display: block; font-size: 13.5px; font-weight: bold; margin-bottom: 4px; color: var(--primary);">Intérprete:</label>
+            <select id="vacRangeInterp" style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px;"></select>
+        </div>
+        <div style="margin-bottom: 12px;">
+            <label style="display: block; font-size: 13.5px; font-weight: bold; margin-bottom: 4px; color: var(--primary);">Turno:</label>
+            <select id="vacRangeTurno" style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px;"></select>
+        </div>
+        <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+            <div style="flex: 1;">
+                <label style="display: block; font-size: 13.5px; font-weight: bold; margin-bottom: 4px; color: var(--primary);">Início:</label>
+                <input type="date" id="vacRangeStart" style="width: 100%; padding: 7px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+            </div>
+            <div style="flex: 1;">
+                <label style="display: block; font-size: 13.5px; font-weight: bold; margin-bottom: 4px; color: var(--primary);">Término:</label>
+                <input type="date" id="vacRangeEnd" style="width: 100%; padding: 7px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+            </div>
+        </div>
+        <div style="margin-bottom: 12px;">
+            <label style="display: block; font-size: 13.5px; font-weight: bold; margin-bottom: 4px; color: var(--primary);">Descrição:</label>
+            <input type="text" id="vacRangeDetail" placeholder="Férias Regulamentares..." value="Férias" style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+        </div>
+        <div style="margin-bottom: 15px;">
+            <label style="display: block; font-size: 13.5px; font-weight: bold; margin-bottom: 4px; color: var(--primary);">Substituto Automático (Opcional):</label>
+            <select id="vacRangeSubstitute" style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px;">
+                <option value="">- Sem Substituto -</option>
+            </select>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 20px;">
+            <button class="btn-close-modal" style="margin-top: 0;" onclick="closeVacationRangeModal()">Cancelar</button>
+            <button style="background: #2980b9; color: white; border: none; padding: 10px 18px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 14px;" onclick="applyVacationRange()">🌴 Aplicar Férias</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========================================== -->
+<!-- SCRIPTS (LÓGICA JAVASCRIPT) -->
+<!-- ========================================== -->
+
+<script>
+    // ----------------------------------------------------
+    // FUNÇÕES DE LOGIN (FIREBASE)
+    // ----------------------------------------------------
+    function fazerLogin() {
+        const email = document.getElementById('loginEmail').value;
+        const pass = document.getElementById('loginPassword').value;
+        if(!email || !pass) return alert("Preencha o e-mail e a senha para entrar!");
+        window.signInWithEmailAndPassword(window.auth, email, pass).then(() => {
+            document.getElementById('loginPassword').value = '';
+        }).catch((error) => alert("Erro ao entrar: " + error.message));
+    }
+    
+    function fazerLogout() { 
+        window.signOut(window.auth).then(() => {
+            document.getElementById('loginEmail').value = '';
+        });
+    }
+
+    // ----------------------------------------------------
+    // SINCRONIZAÇÃO DE DATAS E FIREBASE
+    // ----------------------------------------------------
+    function syncDatesPublic() {
+        const pubYear = document.getElementById('yearInputPublic').value;
+        const pubMonth = document.getElementById('monthSelectPublic').value;
+        document.getElementById('yearInput').value = pubYear;
+        document.getElementById('monthSelect').value = pubMonth;
+        window.loadFromFirebase();
+    }
+
+    function syncDatesPrivate() {
+        const privYear = document.getElementById('yearInput').value;
+        const privMonth = document.getElementById('monthSelect').value;
+        document.getElementById('yearInputPublic').value = privYear;
+        document.getElementById('monthSelectPublic').value = privMonth;
+        window.loadFromFirebase();
+    }
+
+    function saveToFirebase() {
+        if (document.body.classList.contains('modo-leitura')) return;
+        const year = document.getElementById("yearInput").value || "2026";
+        const month = document.getElementById("monthSelect").value || "6";
+        const path = `escalas/${year}_${month}`;
+
+        const dataToSave = {
+            scheduleData: window.scheduleData,
+            interpretes: window.interpretes,
+            interpreterTurnos: window.interpreterTurnos,
+            baseStartDate: window.baseStartDate.toISOString()
+        };
+
+        window.dbSet(window.dbRef(window.db, path), dataToSave)
+            .catch((error) => console.error("Erro ao salvar:", error));
+    }
+
+    // ----------------------------------------------------
+    // VARIÁVEIS E ESTRUTURAS BÁSICAS
+    // ----------------------------------------------------
+    const turnos = ["Manhã (07:00 - 13:00)", "Tarde (13:00 - 19:00)", "Noite (18:00 - 22:15)"];
+    const dias = ["seg", "ter", "qua", "qui", "sex"];
+    let currentWeek = 1;
+    window.interpretes = ["Ana Silva", "Carlos Souza", "Mariana Costa", "Ricardo Alves", "Fernanda Lima"];
+    window.interpreterTurnos = {
+        "Ana Silva": [...turnos], "Carlos Souza": [...turnos], "Mariana Costa": [...turnos], "Ricardo Alves": [...turnos], "Fernanda Lima": [...turnos]
+    };
+    window.baseStartDate = new Date(2026, 6, 6);
+    document.getElementById("startDateInput").valueAsDate = window.baseStartDate;
+    window.scheduleData = {};
+
+    function getInterpreterTurnos(name) {
+        if (!window.interpreterTurnos[name]) window.interpreterTurnos[name] = [...turnos];
+        return window.interpreterTurnos[name];
+    }
+
+    function resetPlannerData() {
+        if (confirm("Tem certeza que deseja APAGAR os dados deste mês no banco e restaurar o padrão?")) {
+            window.scheduleData = {};
+            window.initScheduleData();
+            saveToFirebase();
+            renderTable();
+            renderPublicTable();
+        }
+    }
+
+    window.initScheduleData = function() {
+        window.scheduleData = {};
+        for(let w=1; w<=4; w++){
+            if(!window.scheduleData[w]) window.scheduleData[w] = {};
+            turnos.forEach(t => {
+                if(!window.scheduleData[w][t]) window.scheduleData[w][t] = {};
+                window.interpretes.forEach(i => {
+                    if(!window.scheduleData[w][t][i]) window.scheduleData[w][t][i] = {};
+                    dias.forEach(d => {
+                        if(!window.scheduleData[w][t][i][d]) window.scheduleData[w][t][i][d] = [];
+                    });
+                });
+            });
+        }
+    }
+
+    window.updateDates = function() {
+        let inputDateVal = document.getElementById("startDateInput").value;
+        if(inputDateVal) {
+            let parts = inputDateVal.split("-");
+            window.baseStartDate = new Date(parts[0], parts[1]-1, parts[2]);
+        }
+        let weekOffsetDays = (currentWeek - 1) * 7;
+        dias.forEach((dia, idx) => {
+            let curDate = new Date(window.baseStartDate);
+            curDate.setDate(window.baseStartDate.getDate() + weekOffsetDays + idx);
+            let dayFormatted = curDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+            
+            if(document.getElementById(`date-${dia}`)) document.getElementById(`date-${dia}`).innerText = dayFormatted;
+            if(document.getElementById(`date-${dia}-pub`)) document.getElementById(`date-${dia}-pub`).innerText = dayFormatted;
+        });
+        
+        let mSel = document.getElementById("monthSelect");
+        let monthText = mSel.options[mSel.selectedIndex].text;
+        let yearText = document.getElementById("yearInput").value;
+        
+        if(document.getElementById("currentWeekTitle")) document.getElementById("currentWeekTitle").innerText = `Escala Atual: Semana ${currentWeek} — ${monthText} / ${yearText}`;
+        if(document.getElementById("currentWeekTitlePublic")) document.getElementById("currentWeekTitlePublic").innerText = `Escala Parcial: Semana ${currentWeek} — ${monthText} / ${yearText}`;
+
+        // === NOVO CÓDIGO: Atualiza os botões dinâmicos da visão pública ===
+        for(let w = 1; w <= 4; w++) {
+            let startD = new Date(window.baseStartDate);
+            startD.setDate(startD.getDate() + (w - 1) * 7); // Pega a Segunda-feira
+            
+            let endD = new Date(startD);
+            endD.setDate(startD.getDate() + 4); // Soma 4 dias para pegar a Sexta-feira
+            
+            let startStr = startD.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+            let endStr = endD.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+            
+            let btn = document.getElementById(`btn-pub-w${w}`);
+            if(btn) {
+                btn.innerText = `${w}ª Semana (${startStr} - ${endStr})`;
+            }
+        }
+    }
+
+    function formatTextWithLinks(text) {
+        if (!text) return '';
+        let escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return escaped.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank" style="color: #1F4E79; text-decoration: underline; word-break: break-all;">${url}</a>`).replace(/\n/g, '<br>');
+    }
+
+    function autoResizeTextarea(el) {
+        if (!el) return;
+        el.style.height = 'auto';
+        el.style.height = Math.max(28, el.scrollHeight) + 'px';
+    }
+
+    function autoResizeAllTextareas() {
+        document.querySelectorAll('.auto-expand-textarea').forEach(el => autoResizeTextarea(el));
+    }
+
+    function getPartnersText(pair, trio) {
+        let partners = [pair, trio].filter(Boolean);
+        if (partners.length === 0) return 'Atendimento Individual';
+        if (partners.length === 1) return `Dupla: ${partners[0].split(' ')[0]}`;
+        return `Trio: ${partners[0].split(' ')[0]}, ${partners[1].split(' ')[0]}`;
+    }
+
+    function togglePartnerDropdown(e, el) {
+        if (document.body.classList.contains('modo-leitura')) return;
+        e.stopPropagation();
+        let dd = el.nextElementSibling;
+        let isVisible = dd.style.display === 'block';
+        document.querySelectorAll('.partner-dropdown').forEach(drop => drop.style.display = 'none');
+        dd.style.display = isVisible ? 'none' : 'block';
+    }
+
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.partner-dropdown') && !e.target.closest('.partner-btn')) {
+            document.querySelectorAll('.partner-dropdown').forEach(el => el.style.display = 'none');
+        }
+    });
+
+    // ----------------------------------------------------
+    // RENDERIZAÇÃO DA TABELA PÚBLICA
+    // ----------------------------------------------------
+    window.renderPublicTable = function() {
+        if(!window.scheduleData || !window.scheduleData[1]) return;
+        const tbody = document.getElementById("publicTableBody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+
+        turnos.forEach(turno => {
+            let turnoRow = document.createElement("tr");
+            turnoRow.innerHTML = `<td colspan="6" class="turno-row">${turno}</td>`;
+            tbody.appendChild(turnoRow);
+
+            window.interpretes.forEach((interp) => {
+                let userTurnos = getInterpreterTurnos(interp);
+                if (!userTurnos.includes(turno)) return;
+
+                let row = document.createElement("tr");
+                let html = `<td style="font-weight: bold; background: #fafafa; text-align: left; width: 15%;">${interp}</td>`;
+                
+                dias.forEach(dia => {
+                    let demands = (window.scheduleData[currentWeek] && window.scheduleData[currentWeek][turno] && window.scheduleData[currentWeek][turno][interp]) ? window.scheduleData[currentWeek][turno][interp][dia] || [] : [];
+                    let cellHtml = `<div style="display:flex; flex-direction:column; gap:8px;">`;
+                    
+                    demands.forEach((dem) => {
+                        let isHoliday = (dem.type === 'Outros' && dem.obs && dem.obs.toLowerCase().includes('suspensão'));
+                        
+                        // ⚠️ FILTRO PÚBLICO: NÃO MOSTRA 'Não Atendimento' AQUI.
+                        if (dem.type === 'Atendimento' || dem.type === 'Férias' || isHoliday) {
+                            let cssClass = 'atend';
+                            if (dem.type === 'Férias') cssClass = 'ferias';
+                            if (isHoliday) cssClass = 'naoatend';
+
+                            let partners = [dem.pair, dem.trio].filter(Boolean);
+                            let equipeText = partners.length > 0 ? `<div style="font-size: 11.5px; font-weight: bold; color: #444; margin-top: 4px;">👥 Com: ${partners.join(', ')}</div>` : '';
+
+                            cellHtml += `
+                            <div class="demand-card-public ${cssClass}">
+                                <div style="font-weight: bold; font-size: 13.5px; color: ${dem.customColor !== '#ffffff' ? dem.customColor : '#111'};">${dem.detail || dem.type}</div>
+                                <div style="font-size: 12px; color: #555; margin-top: 3px;">
+                                    ${dem.location ? `📍 ${dem.location}<br>` : ''}
+                                    ${dem.startTime ? `🕒 ${dem.startTime} - ${dem.endTime}` : ''}
+                                </div>
+                                ${equipeText}
+                            </div>`;
+                        }
+                    });
+                    cellHtml += `</div>`;
+                    html += `<td>${cellHtml}</td>`;
+                });
+                row.innerHTML = html;
+                tbody.appendChild(row);
+            });
+        });
+    };
+
+    // ----------------------------------------------------
+    // RENDERIZAÇÃO DA TABELA PRIVADA
+    // ----------------------------------------------------
+    window.renderTable = function() {
+        if(!window.scheduleData || !window.scheduleData[1]) return;
+        const tbody = document.getElementById("tableBody");
+        if(!tbody) return;
+        tbody.innerHTML = "";
+        
+        let totalHoursPerInterp = {};
+        window.interpretes.forEach(i => totalHoursPerInterp[i] = 0);
+
+        turnos.forEach(turno => {
+            window.interpretes.forEach(interp => {
+                dias.forEach(dia => {
+                    let demands = window.scheduleData[currentWeek][turno][interp] ? window.scheduleData[currentWeek][turno][interp][dia] || [] : [];
+                    demands.forEach(dem => {
+                        if (dem.type && dem.hours) totalHoursPerInterp[interp] += parseFloat(dem.hours);
+                    });
+                });
+            });
+        });
+
+        turnos.forEach(turno => {
+            let turnoCode = turno.startsWith("Manhã") ? "manha" : turno.startsWith("Tarde") ? "tarde" : "noite";
+            let turnoRow = document.createElement("tr");
+            turnoRow.className = `row-turno-${turnoCode}`;
+            turnoRow.innerHTML = `<td colspan="7" class="turno-row">${turno}</td>`;
+            tbody.appendChild(turnoRow);
+
+            window.interpretes.forEach((interp, interpIdx) => {
+                let userTurnos = getInterpreterTurnos(interp);
+                if (!userTurnos.includes(turno)) return;
+
+                let row = document.createElement("tr");
+                row.className = `row-turno-${turnoCode} row-interp-${interpIdx}`;
+                let hours = totalHoursPerInterp[interp] || 0;
+                let html = `<td class="interpreter-cell">${interp}</td>`;
+                html += `<td class="hours-cell col-hours-cell">${hours.toFixed(1)}h / sem</td>`;
+                
+                dias.forEach(dia => {
+                    let demands = window.scheduleData[currentWeek][turno][interp] ? window.scheduleData[currentWeek][turno][interp][dia] || [] : [];
+                    let cellHtml = `<div class="demands-list">`;
+                    
+                    demands.forEach((dem, idx) => {
+                        cellHtml += `
+                        <div class="demand-card" data-type="${dem.type}">
+                            <div class="demand-header">
+                                <select data-val="${dem.type}" onchange="updateDemandType('${turno}', '${interp}', '${dia}', ${idx}, this.value)" style="flex: 1;">
+                                    <option value="">- Tipo -</option>
+                                    <option value="Atendimento" ${dem.type==='Atendimento'?'selected':''}>Atendimento</option>
+                                    <option value="Estudo" ${dem.type==='Estudo'?'selected':''}>Estudo</option>
+                                    <option value="Planejamento" ${dem.type==='Planejamento'?'selected':''}>Planejamento</option>
+                                    <option value="Evento" ${dem.type==='Evento'?'selected':''}>Evento</option>
+                                    <option value="Tradução" ${dem.type==='Tradução'?'selected':''}>Tradução</option>
+                                    <option value="Disciplinas" ${dem.type==='Disciplinas'?'selected':''}>Disciplinas</option>
+                                    <option value="Reunião" ${dem.type==='Reunião'?'selected':''}>Reunião</option>
+                                    <option value="Projeto" ${dem.type==='Projeto'?'selected':''}>Projeto</option>
+                                    <option value="Outros" ${dem.type==='Outros'?'selected':''}>Outros</option>
+                                    <option value="Não Atendimento" ${dem.type==='Não Atendimento'?'selected':''}>Não Atendimento</option>
+                                    <option value="Substituição" ${dem.type==='Substituição'?'selected':''}>Substituição</option>
+                                    <option value="Férias" ${dem.type==='Férias'?'selected':''}>Férias</option>
+                                </select>
+                                <select class="duration-select" onchange="updateDemandHours('${turno}', '${interp}', '${dia}', ${idx}, this.value)" style="width: 65px;" title="Carga Horária">
+                                    <option value="0" ${dem.hours==0?'selected':''}>0h</option>
+                                    <option value="0.5" ${dem.hours==0.5?'selected':''}>0.5h</option>
+                                    <option value="1" ${dem.hours==1?'selected':''}>1.0h</option>
+                                    <option value="1.5" ${dem.hours==1.5?'selected':''}>1.5h</option>
+                                    <option value="2" ${dem.hours==2?'selected':''}>2.0h</option>
+                                    <option value="2.5" ${dem.hours==2.5?'selected':''}>2.5h</option>
+                                    <option value="3" ${dem.hours==3?'selected':''}>3.0h</option>
+                                    <option value="3.5" ${dem.hours==3.5?'selected':''}>3.5h</option>
+                                    <option value="4" ${dem.hours==4?'selected':''}>4.0h</option>
+                                    <option value="4.5" ${dem.hours==4.5?'selected':''}>4.5h</option>
+                                    <option value="5" ${dem.hours==5?'selected':''}>5.0h</option>
+                                    <option value="5.5" ${dem.hours==5.5?'selected':''}>5.5h</option>
+                                    <option value="6" ${dem.hours==6?'selected':''}>6.0h</option>
+                                </select>
+                                <select title="Área do Conhecimento" style="font-size: 12px; padding: 5px; width: 90px;" onchange="updateDemandColor('${turno}', '${interp}', '${dia}', ${idx}, this.value)">
+                                    <option value="#ffffff" ${(!dem.customColor || dem.customColor==='#ffffff')?'selected':''}>🎓 Área...</option>
+                                    <option value="#efe6fa" ${dem.customColor==='#efe6fa'?'selected':''}>🧠 Hum.</option>
+                                    <option value="#e6f0fa" ${dem.customColor==='#e6f0fa'?'selected':''}>📐 Exatas</option>
+                                    <option value="#e6f8e8" ${dem.customColor==='#e6f8e8'?'selected':''}>🧬 Bio/Saúde</option>
+                                    <option value="#ffe6e6" ${dem.customColor==='#ffe6e6'?'selected':''}>⚖️ Sociais</option>
+                                    <option value="#fff3cd" ${dem.customColor==='#fff3cd'?'selected':''}>🌱 Agrárias</option>
+                                    <option value="#e6fafa" ${dem.customColor==='#e6fafa'?'selected':''}>💻 Eng/Tec</option>
+                                    <option value="#fde2e4" ${dem.customColor==='#fde2e4'?'selected':''}>🎨 Artes</option>
+                                    <option value="#f8d7da" ${dem.customColor==='#f8d7da'?'selected':''}>🛑 Feriado</option>
+                                </select>
+                            </div>
+                            
+                            ${dem.type === 'Não Atendimento' || dem.type === 'Férias' ? `
+                            <div style="margin-bottom: 6px;">
+                                <input type="text" placeholder="${dem.type === 'Férias' ? 'Justificativa...' : 'Motivo da ausência...'}" value="${dem.justification || ''}" style="width: 100%; border: 1px solid ${dem.type === 'Férias' ? '#2980b9' : '#e74c3c'}; background-color: ${dem.type === 'Férias' ? '#ebf5fb' : '#fdf2f2'}; font-size: 13px;" onchange="updateDemandJustification('${turno}', '${interp}', '${dia}', ${idx}, this.value)">
+                                <select class="admin-only" onchange="assignSubstitute('${turno}', '${interp}', '${dia}', ${idx}, this.value)" style="width: 100%; border: 1px solid #f39c12; background-color: #fef9e7; font-size: 13px; margin-top: 4px; padding: 6px;">
+                                    <option value="">- Sem Substituto -</option>
+                                    ${window.interpretes.filter(other => other !== interp).map(other => `<option value="${other}" ${dem.substitute === other ? 'selected' : ''}>${other}</option>`).join('')}
+                                </select>
+                            </div>` : ''}
+
+                            <div style="display: flex; gap: 6px; align-items: center; margin-bottom: 6px;">
+                                <textarea placeholder="Demanda..." class="auto-expand-textarea" style="flex: 1; margin-bottom: 0; background-color: ${dem.customColor || '#ffffff'}; resize: none; font-family: inherit; font-size: 13.5px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; min-height: 28px; overflow: hidden; box-sizing: border-box;" rows="1" oninput="autoResizeTextarea(this)" onchange="updateDemandDetail('${turno}', '${interp}', '${dia}', ${idx}, this.value)">${dem.detail || ''}</textarea>
+                                <input type="color" class="admin-only" value="${dem.customColor || '#ffffff'}" title="Personalizar cor" style="width: 28px; height: 28px; padding: 0; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;" onchange="updateDemandColor('${turno}', '${interp}', '${dia}', ${idx}, this.value)" />
+                            </div>
+                            
+                            <div style="position: relative; margin-bottom: 6px; width: 100%;">
+                                <div class="partner-btn" onclick="togglePartnerDropdown(event, this)" style="border: 1px solid #ccc; padding: 6px 8px; border-radius: 4px; font-size: 12.5px; background: #fafafa; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+                                    <span class="partner-button-text" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: bold; color: #000;">👥 ${getPartnersText(dem.pair, dem.trio)}</span>
+                                    <span class="admin-only" style="font-size: 10px; margin-left: 5px; color: #333;">▼</span>
+                                </div>
+                                <div class="partner-dropdown" style="display: none; position: absolute; top: 100%; left: 0; z-index: 100; background: white; border: 1px solid #ccc; width: 100%; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-radius: 4px; max-height: 120px; overflow-y: auto;">
+                                    ${window.interpretes.filter(other => other !== interp).map(other => {
+                                        let isChecked = (dem.pair === other || dem.trio === other) ? 'checked' : '';
+                                        return `<label style="display: block; padding: 7px; font-size: 13px; cursor: pointer; border-bottom: 1px solid #eee; margin: 0; font-weight: bold; color: #000; background: ${isChecked ? '#f0f7ff' : 'transparent'};">
+                                        <input type="checkbox" value="${other}" ${isChecked} style="margin-right: 6px;" onchange="updateDemandPartners('${turno}', '${interp}', '${dia}', ${idx}, this.closest('.partner-dropdown').querySelectorAll('input[type=checkbox]'))"> ${other}</label>`;
+                                    }).join('')}
+                                </div>
+                            </div>
+                            
+                            <input type="text" placeholder="📍 Local..." value="${dem.location || ''}" onchange="updateDemandLocation('${turno}', '${interp}', '${dia}', ${idx}, this.value)" />
+                            
+                            <div class="time-row" style="font-size: 12px;">
+                                <input type="time" value="${dem.startTime || ''}" onchange="updateDemandStartTime('${turno}', '${interp}', '${dia}', ${idx}, this.value)" title="Início" style="font-size: 12px; padding: 4px;">
+                                <span>até</span>
+                                <input type="time" value="${dem.endTime || ''}" onchange="updateDemandEndTime('${turno}', '${interp}', '${dia}', ${idx}, this.value)" title="Término" style="font-size: 12px; padding: 4px;">
+                            </div>
+
+                            <div class="obs-container" style="width: 100%; margin-bottom: 6px;">
+                                <textarea placeholder="📝 Observações..." class="auto-expand-textarea obs-edit-input" style="width: 100%; background-color: #fafafa; resize: none; font-family: inherit; font-size: 12.5px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; min-height: 26px; overflow: hidden; box-sizing: border-box;" rows="1" oninput="autoResizeTextarea(this)" onchange="updateDemandObs('${turno}', '${interp}', '${dia}', ${idx}, this.value)">${dem.obs || ''}</textarea>
+                                ${dem.obs ? `<div class="obs-print-display" style="font-size: 12.5px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; background-color: #fafafa; text-align: left; white-space: pre-wrap; word-break: break-word;">${formatTextWithLinks(dem.obs)}</div>` : ''}
+                            </div>
+                            <button class="btn-remove admin-only" onclick="removeDemand('${turno}', '${interp}', '${dia}', ${idx})">✕ Remover</button>
+                        </div>`;
+                    });
+
+                    cellHtml += `</div><button class="btn-add admin-only" onclick="addDemand('${turno}', '${interp}', '${dia}')">+ Demanda</button>`;
+                    html += `<td class="col-day-${dia}">${cellHtml}</td>`;
+                });
+                row.innerHTML = html;
+                tbody.appendChild(row);
+            });
+        });
+
+        renderBalance(totalHoursPerInterp);
+        setTimeout(autoResizeAllTextareas, 0);
+    };
+
+    // ----------------------------------------------------
+    // LÓGICAS DE EDIÇÃO DE DEMANDA (CRUD)
+    // ----------------------------------------------------
+    window.addDemand = function(turno, interp, dia) {
+        if(!window.scheduleData[currentWeek][turno][interp][dia]) window.scheduleData[currentWeek][turno][interp][dia] = [];
+        window.scheduleData[currentWeek][turno][interp][dia].push({ 
+            type: "Atendimento", detail: "", pair: "", trio: "", location: "", startTime: "", endTime: "", hours: 1, justification: "", substitute: "", originalInterp: "", originalDetail: ""
+        });
+        saveToFirebase(); renderTable(); updateChart();
+    }
+
+    function syncGroupDemands(turno, interp, dia, idx) {
+        let currentDemand = window.scheduleData[currentWeek][turno][interp][dia][idx];
+        let partners = [currentDemand.pair, currentDemand.trio].filter(Boolean);
+
+        partners.forEach(partner => {
+            if (window.scheduleData[currentWeek][turno][partner]) {
+                if (!window.scheduleData[currentWeek][turno][partner][dia]) window.scheduleData[currentWeek][turno][partner][dia] = [];
+                let partnerDemands = window.scheduleData[currentWeek][turno][partner][dia];
+                let existingMirror = partnerDemands.find(d => (d.pair === interp || d.trio === interp || d.pair === currentDemand.pair || d.trio === currentDemand.trio) && d.detail === currentDemand.detail && d.startTime === currentDemand.startTime);
+
+                let allMembers = [interp, currentDemand.pair, currentDemand.trio].filter(Boolean);
+                let otherMembers = allMembers.filter(m => m !== partner);
+                let safeType = (['Não Atendimento', 'Substituição', 'Férias'].includes(currentDemand.type)) ? 'Atendimento' : currentDemand.type;
+
+                if (!existingMirror) {
+                    partnerDemands.push({
+                        type: safeType, detail: currentDemand.detail, customColor: currentDemand.customColor || "", obs: currentDemand.obs || "", pair: otherMembers[0] || "", trio: otherMembers[1] || "", location: currentDemand.location, startTime: currentDemand.startTime, endTime: currentDemand.endTime, hours: currentDemand.hours
+                    });
+                } else {
+                    if (!['Não Atendimento', 'Substituição', 'Férias'].includes(existingMirror.type)) existingMirror.type = safeType;
+                    existingMirror.detail = currentDemand.detail; existingMirror.customColor = currentDemand.customColor || ""; existingMirror.obs = currentDemand.obs || ""; existingMirror.pair = otherMembers[0] || ""; existingMirror.trio = otherMembers[1] || ""; existingMirror.location = currentDemand.location; existingMirror.startTime = currentDemand.startTime; existingMirror.endTime = currentDemand.endTime; existingMirror.hours = currentDemand.hours;
+                }
+            }
+        });
+    }
+
+    window.updateDemandPartners = function(turno, interp, dia, idx, checkboxList) {
+        let currentDemand = window.scheduleData[currentWeek][turno][interp][dia][idx];
+        let oldPair = currentDemand.pair; let oldTrio = currentDemand.trio;
+        let selected = Array.from(checkboxList).filter(cb => cb.checked).map(cb => cb.value);
+
+        if (selected.length > 2) return alert("Máximo de 2 parceiros permitidos (trio).");
+        currentDemand.pair = selected[0] || ""; currentDemand.trio = selected[1] || "";
+
+        let removedPartners = [oldPair, oldTrio].filter(p => p && p !== currentDemand.pair && p !== currentDemand.trio);
+        removedPartners.forEach(removed => {
+            if (window.scheduleData[currentWeek][turno][removed] && window.scheduleData[currentWeek][turno][removed][dia]) {
+                let pDemands = window.scheduleData[currentWeek][turno][removed][dia];
+                let linkedIdx = pDemands.findIndex(d => (d.pair === interp || d.trio === interp) && d.detail === currentDemand.detail);
+                if (linkedIdx !== -1) pDemands.splice(linkedIdx, 1);
+            }
+        });
+        syncGroupDemands(turno, interp, dia, idx); saveToFirebase(); renderTable(); updateChart();
+    }
+
+    window.removeDemand = function(turno, interp, dia, idx) {
+        let currentDemand = window.scheduleData[currentWeek][turno][interp][dia][idx];
+        let partners = [currentDemand.pair, currentDemand.trio].filter(Boolean);
+
+        partners.forEach(partner => {
+            if (window.scheduleData[currentWeek][turno][partner] && window.scheduleData[currentWeek][turno][partner][dia]) {
+                let partnerDemands = window.scheduleData[currentWeek][turno][partner][dia];
+                let linkedIdx = partnerDemands.findIndex(d => (d.pair === interp || d.trio === interp) && d.detail === currentDemand.detail);
+                if (linkedIdx !== -1) partnerDemands.splice(linkedIdx, 1);
+            }
+        });
+
+        if (currentDemand.substitute) {
+            if (window.scheduleData[currentWeek][turno][currentDemand.substitute] && window.scheduleData[currentWeek][turno][currentDemand.substitute][dia]) {
+                let subDems = window.scheduleData[currentWeek][turno][currentDemand.substitute][dia];
+                let remIdx = subDems.findIndex(d => d.type === 'Substituição' && d.originalInterp === interp && d.originalDetail === currentDemand.detail);
+                if(remIdx > -1) subDems.splice(remIdx, 1);
+            }
+        }
+        window.scheduleData[currentWeek][turno][interp][dia].splice(idx, 1);
+        saveToFirebase(); renderTable(); updateChart();
+    }
+
+    function syncPairDemand(turno, interp, dia, idx, key, value) {
+        let dem = window.scheduleData[currentWeek][turno][interp][dia][idx];
+        dem[key] = value;
+        let partners = [dem.pair, dem.trio].filter(Boolean);
+        partners.forEach(partner => {
+            if (window.scheduleData[currentWeek][turno][partner] && window.scheduleData[currentWeek][turno][partner][dia]) {
+                let pDemands = window.scheduleData[currentWeek][turno][partner][dia];
+                let mirror = pDemands.find(d => (d.pair === interp || d.trio === interp) && (d.detail === dem.detail || key === 'detail'));
+                if (mirror) { 
+                    if (key === 'type' && ['Não Atendimento', 'Substituição', 'Férias'].includes(value)) return;
+                    mirror[key] = value; 
+                }
+            }
+        });
+        if (dem.substitute && window.scheduleData[currentWeek][turno][dem.substitute] && window.scheduleData[currentWeek][turno][dem.substitute][dia]) {
+            let sDem = window.scheduleData[currentWeek][turno][dem.substitute][dia].find(d => d.type === 'Substituição' && d.originalInterp === interp && (d.originalDetail === dem.detail || key === 'detail'));
+            if (sDem) { if (key === 'detail') sDem.originalDetail = value; if (key !== 'type') sDem[key] = value; }
+        }
+    }
+
+    window.updateDemandType = function(turno, interp, dia, idx, value) { 
+        let dem = window.scheduleData[currentWeek][turno][interp][dia][idx];
+        let oldType = dem.type; dem.type = value;
+        
+        if ((oldType === 'Não Atendimento' || oldType === 'Férias') && value !== oldType && dem.substitute) {
+            if (window.scheduleData[currentWeek][turno][dem.substitute] && window.scheduleData[currentWeek][turno][dem.substitute][dia]) {
+                let subDems = window.scheduleData[currentWeek][turno][dem.substitute][dia];
+                let remIdx = subDems.findIndex(d => d.type === 'Substituição' && d.originalInterp === interp && d.originalDetail === dem.detail);
+                if(remIdx > -1) subDems.splice(remIdx, 1);
+            }
+            [dem.pair, dem.trio].filter(Boolean).forEach(partner => {
+                if (window.scheduleData[currentWeek][turno][partner] && window.scheduleData[currentWeek][turno][partner][dia]) {
+                    let mirror = window.scheduleData[currentWeek][turno][partner][dia].find(d => (d.pair === interp || d.trio === interp) && d.detail === dem.detail);
+                    if (mirror) mirror.obs = (mirror.obs || "").replace(new RegExp(`⚠️ \\[${interp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} substituído\\(a\\) por: .*?\\]\\n?`, 'g'), "");
+                }
+            });
+            dem.substitute = ""; dem.justification = "";
+        }
+        syncPairDemand(turno, interp, dia, idx, 'type', value); saveToFirebase(); renderTable(); updateChart(); 
+    }
+
+    window.updateDemandJustification = function(turno, interp, dia, idx, value) {
+        let dem = window.scheduleData[currentWeek][turno][interp][dia][idx];
+        dem.justification = value;
+        if (dem.substitute && window.scheduleData[currentWeek][turno][dem.substitute] && window.scheduleData[currentWeek][turno][dem.substitute][dia]) {
+            let sDem = window.scheduleData[currentWeek][turno][dem.substitute][dia].find(d => d.type === 'Substituição' && d.originalInterp === interp && d.originalDetail === dem.detail);
+            if (sDem) sDem.obs = `Substituindo: ${interp}` + (value ? ` | Motivo: ${value}` : "");
+        }
+        saveToFirebase(); renderTable();
+    }
+
+    window.assignSubstitute = function(turno, interp, dia, idx, subName) {
+        let dem = window.scheduleData[currentWeek][turno][interp][dia][idx];
+        let oldSub = dem.substitute; dem.substitute = subName;
+
+        if (oldSub && window.scheduleData[currentWeek][turno][oldSub]) {
+            let subDems = window.scheduleData[currentWeek][turno][oldSub][dia];
+            let remIdx = subDems.findIndex(d => d.type === 'Substituição' && d.originalInterp === interp && d.originalDetail === dem.detail);
+            if(remIdx > -1) subDems.splice(remIdx, 1);
+        }
+        if (subName && window.scheduleData[currentWeek][turno][subName]) {
+            if(!window.scheduleData[currentWeek][turno][subName][dia]) window.scheduleData[currentWeek][turno][subName][dia] = [];
+            window.scheduleData[currentWeek][turno][subName][dia].push({
+                type: "Substituição", detail: dem.detail, originalInterp: interp, originalDetail: dem.detail, pair: dem.pair, trio: dem.trio, location: dem.location, startTime: dem.startTime, endTime: dem.endTime, hours: dem.hours, customColor: dem.customColor, obs: `Substituindo: ${interp}` + (dem.justification ? ` | Motivo: ${dem.justification}` : "")
+            });
+        }
+        [dem.pair, dem.trio].filter(Boolean).forEach(partner => {
+            if (window.scheduleData[currentWeek][turno][partner] && window.scheduleData[currentWeek][turno][partner][dia]) {
+                let mirror = window.scheduleData[currentWeek][turno][partner][dia].find(d => (d.pair === interp || d.trio === interp) && d.detail === dem.detail);
+                if (mirror) {
+                    mirror.obs = (mirror.obs || "").replace(new RegExp(`⚠️ \\[${interp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} substituído\\(a\\) por: .*?\\]\\n?`, 'g'), "");
+                    if (subName) mirror.obs = `⚠️ [${interp} substituído(a) por: ${subName}]\n` + mirror.obs;
+                }
+            }
+        });
+        saveToFirebase(); renderTable(); updateChart();
+    }
+
+    function autoCalculateEndTime(dem) {
+        if (dem.startTime && dem.hours) {
+            let parts = dem.startTime.split(":");
+            if (parts.length === 2) {
+                let h = parseInt(parts[0], 10); let m = parseInt(parts[1], 10);
+                if (!isNaN(h) && !isNaN(m)) {
+                    let totalMin = h * 60 + m + Math.round(parseFloat(dem.hours) * 60);
+                    dem.endTime = String(Math.floor(totalMin / 60) % 24).padStart(2, '0') + ":" + String(totalMin % 60).padStart(2, '0');
+                }
+            }
+        }
+    }
+
+    window.updateDemandHours = function(t, i, d, idx, v) { let dem = window.scheduleData[currentWeek][t][i][d][idx]; dem.hours = parseFloat(v); autoCalculateEndTime(dem); syncPairDemand(t, i, d, idx, 'hours', dem.hours); syncPairDemand(t, i, d, idx, 'endTime', dem.endTime); saveToFirebase(); renderTable(); updateChart(); }
+    window.updateDemandStartTime = function(t, i, d, idx, v) { let dem = window.scheduleData[currentWeek][t][i][d][idx]; dem.startTime = v; autoCalculateEndTime(dem); syncPairDemand(t, i, d, idx, 'startTime', dem.startTime); syncPairDemand(t, i, d, idx, 'endTime', dem.endTime); saveToFirebase(); renderTable(); }
+    window.updateDemandEndTime = function(t, i, d, idx, v) { syncPairDemand(t, i, d, idx, 'endTime', v); saveToFirebase(); }
+    window.updateDemandColor = function(t, i, d, idx, v) { syncPairDemand(t, i, d, idx, 'customColor', v); saveToFirebase(); renderTable(); }
+    window.updateDemandDetail = function(t, i, d, idx, v) { syncPairDemand(t, i, d, idx, 'detail', v); saveToFirebase(); }
+    window.updateDemandObs = function(t, i, d, idx, v) { syncPairDemand(t, i, d, idx, 'obs', v); saveToFirebase(); }
+    window.updateDemandLocation = function(t, i, d, idx, v) { syncPairDemand(t, i, d, idx, 'location', v); saveToFirebase(); }
+
+    window.changeWeek = function(weekNum) {
+        // Atualiza estilo dos botões da tela de GESTÃO
+        document.querySelectorAll(".nav-weeks button").forEach(b => b.classList.remove("active"));
+        if (document.getElementById(`btn-w${weekNum}`)) {
+            document.getElementById(`btn-w${weekNum}`).classList.add("active");
+        }
+
+        // Atualiza estilo dos botões da tela PÚBLICA
+        for(let i = 1; i <= 4; i++) {
+            let pubBtn = document.getElementById(`btn-pub-w${i}`);
+            if(pubBtn) {
+                if (i === weekNum) {
+                    pubBtn.style.background = "var(--primary)";
+                    pubBtn.style.borderColor = "var(--primary)";
+                    pubBtn.style.color = "white";
+                } else {
+                    pubBtn.style.background = "#f0f0f0";
+                    pubBtn.style.borderColor = "#ccc";
+                    pubBtn.style.color = "#333";
+                }
+            }
+        }
+
+        currentWeek = weekNum;
+        window.updateDates();
+        window.renderPublicTable();
+        window.renderTable();
+    }
+
+    // ----------------------------------------------------
+    // GERENCIAR INTÉRPRETES E TURNOS
+    // ----------------------------------------------------
+    window.openModal = function() { renderInterpretersManageList(); document.getElementById("modalOverlay").style.display = "flex"; }
+    window.closeModal = function() { document.getElementById("modalOverlay").style.display = "none"; renderTable(); updateChart(); }
+
+    function renderInterpretersManageList() {
+        const container = document.getElementById("interpretersListManage");
+        container.innerHTML = "";
+        window.interpretes.forEach((name, idx) => {
+            let uT = getInterpreterTurnos(name);
+            let div = document.createElement("div"); div.className = "interp-item-manage";
+            div.style.cssText = "display: flex; flex-direction: column; background: #fdfdfd; border: 1px solid #e0e0e0; padding: 10px; border-radius: 6px; margin-bottom: 10px;";
+            div.innerHTML = `
+                <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
+                    <input type="text" value="${name}" style="flex: 1; padding: 8px; font-weight: 600;" onchange="editInterpreterName(${idx}, this.value)">
+                    <button class="btn-danger" onclick="deleteInterpreter(${idx})">Excluir</button>
+                </div>
+                <div style="display: flex; gap: 12px; font-size: 13px; color: #444; background: #f4f6f8; padding: 8px 12px; border-radius: 4px;">
+                    <span style="font-weight: bold; color: var(--primary);">Turnos:</span>
+                    <label><input type="checkbox" ${uT.includes(turnos[0])?'checked':''} onchange="toggleInterpreterTurno('${name}', '${turnos[0]}', this.checked)"> Manhã</label>
+                    <label><input type="checkbox" ${uT.includes(turnos[1])?'checked':''} onchange="toggleInterpreterTurno('${name}', '${turnos[1]}', this.checked)"> Tarde</label>
+                    <label><input type="checkbox" ${uT.includes(turnos[2])?'checked':''} onchange="toggleInterpreterTurno('${name}', '${turnos[2]}', this.checked)"> Noite</label>
+                </div>
+            `;
+            container.appendChild(div);
+        });
+    }
+
+    window.toggleInterpreterTurno = function(name, turno, isChecked) {
+        let uT = getInterpreterTurnos(name);
+        if (isChecked) { if (!uT.includes(turno)) uT.push(turno); } 
+        else {
+            if (uT.length <= 1) return alert("O intérprete precisa de pelo menos 1 turno!");
+            uT.splice(uT.indexOf(turno), 1);
+        }
+        saveToFirebase();
+    }
+    window.addInterpreter = function() { window.interpretes.push(`Novo Intérprete ${window.interpretes.length + 1}`); saveToFirebase(); renderInterpretersManageList(); }
+    window.editInterpreterName = function(idx, newName) {
+        let old = window.interpretes[idx]; window.interpretes[idx] = newName;
+        if (window.interpreterTurnos[old]) { window.interpreterTurnos[newName] = window.interpreterTurnos[old]; delete window.interpreterTurnos[old]; }
+        for(let w=1; w<=4; w++){ turnos.forEach(t => { if(window.scheduleData[w][t] && window.scheduleData[w][t][old]) { window.scheduleData[w][t][newName] = window.scheduleData[w][t][old]; delete window.scheduleData[w][t][old]; } }); }
+        saveToFirebase();
+    }
+    window.deleteInterpreter = function(idx) {
+        let name = window.interpretes[idx]; window.interpretes.splice(idx, 1);
+        delete window.interpreterTurnos[name];
+        for(let w=1; w<=4; w++){ turnos.forEach(t => { if (window.scheduleData[w][t]) delete window.scheduleData[w][t][name]; }); }
+        saveToFirebase(); renderInterpretersManageList();
+    }
+
+    // ----------------------------------------------------
+    // FERIADOS E FÉRIAS EM MASSA
+    // ----------------------------------------------------
+    window.openHolidayModal = function() { document.getElementById("holidayReason").value = "Feriado Institucional"; document.getElementById("holidayModalOverlay").style.display = "flex"; }
+    window.closeHolidayModal = function() { document.getElementById("holidayModalOverlay").style.display = "none"; }
+    window.applyHoliday = function() {
+        let dia = document.getElementById("holidayDay").value;
+        let reason = document.getElementById("holidayReason").value || "Feriado / Suspensão";
+        let dayName = document.querySelector(`#holidayDay option[value="${dia}"]`).text;
+        if(!confirm(`Apagar demandas atuais de TODOS na ${dayName} (Sem. ${currentWeek}) e substituir por "${reason}"?`)) return;
+
+        turnos.forEach(t => { window.interpretes.forEach(i => {
+            if (getInterpreterTurnos(i).includes(t)) {
+                window.scheduleData[currentWeek][t][i][dia] = [{ type: "Outros", detail: reason, customColor: "#f8d7da", obs: "Suspensão", pair: "", trio: "", location: "-", startTime: "", endTime: "", hours: 0 }];
+            }
+        }); });
+        closeHolidayModal(); saveToFirebase(); renderTable(); renderPublicTable(); updateChart();
+    }
+    window.clearHoliday = function() {
+        let dia = document.getElementById("holidayDay").value;
+        if(!confirm(`Apagar todas as demandas da ${dia} (Sem. ${currentWeek}) para todos?`)) return;
+        turnos.forEach(t => { window.interpretes.forEach(i => { window.scheduleData[currentWeek][t][i][dia] = []; }); });
+        closeHolidayModal(); saveToFirebase(); renderTable(); renderPublicTable(); updateChart();
+    }
+
+    window.openVacationRangeModal = function() {
+        document.getElementById("vacRangeInterp").innerHTML = window.interpretes.map(i => `<option value="${i}">${i}</option>`).join('');
+        document.getElementById("vacRangeTurno").innerHTML = turnos.map(t => `<option value="${t}">${t}</option>`).join('');
+        document.getElementById("vacRangeSubstitute").innerHTML = `<option value="">- Sem Substituto -</option>` + window.interpretes.map(i => `<option value="${i}">${i}</option>`).join('');
+        document.getElementById("vacRangeStart").valueAsDate = new Date(); document.getElementById("vacRangeEnd").valueAsDate = new Date();
+        document.getElementById("vacationRangeModalOverlay").style.display = "flex";
+    }
+    window.closeVacationRangeModal = function() { document.getElementById("vacationRangeModalOverlay").style.display = "none"; }
+    window.applyVacationRange = function() {
+        let interp = document.getElementById("vacRangeInterp").value; let turno = document.getElementById("vacRangeTurno").value;
+        let startVal = document.getElementById("vacRangeStart").value; let endVal = document.getElementById("vacRangeEnd").value;
+        let detail = document.getElementById("vacRangeDetail").value || "Férias"; let sub = document.getElementById("vacRangeSubstitute").value;
+
+        if (!startVal || !endVal) return alert("Selecione data de início e término.");
+        let sDate = new Date(startVal+"T00:00:00"); let eDate = new Date(endVal+"T00:00:00");
+        if (sDate > eDate) return alert("Início não pode ser maior que término.");
+
+        let curDate = new Date(sDate); let count = 0;
+        while (curDate <= eDate) {
+            let dW = curDate.getDay();
+            if (dW >= 1 && dW <= 5) {
+                let dCode = ["dom","seg","ter","qua","qui","sex","sab"][dW];
+                let diffDays = Math.floor((curDate - window.baseStartDate) / (1000*60*60*24));
+                let tWeek = Math.floor(diffDays / 7) + 1;
+
+                if (tWeek >= 1 && tWeek <= 4) {
+                    if (!window.scheduleData[tWeek][turno][interp][dCode]) window.scheduleData[tWeek][turno][interp][dCode] = [];
+                    window.scheduleData[tWeek][turno][interp][dCode].push({
+                        type: "Férias", detail: detail, hours: 0, justification: detail, substitute: sub, pair: "", trio: "", location: "-", startTime: "", endTime: "", obs: sub ? `Substituído(a) por: ${sub}` : ""
+                    });
+                    if (sub && sub !== interp) {
+                        if (!window.scheduleData[tWeek][turno][sub]) window.scheduleData[tWeek][turno][sub] = {};
+                        if (!window.scheduleData[tWeek][turno][sub][dCode]) window.scheduleData[tWeek][turno][sub][dCode] = [];
+                        window.scheduleData[tWeek][turno][sub][dCode].push({
+                            type: "Substituição", detail: detail, originalInterp: interp, originalDetail: detail, hours: 0, substitute: "", pair: "", trio: "", location: "-", startTime: "", endTime: "", obs: `Substituindo: ${interp}`
+                        });
+                    }
+                    count++;
+                }
+            }
+            curDate.setDate(curDate.getDate() + 1);
+        }
+        alert(`Aplicado em ${count} dia(s) útil(eis)!`); closeVacationRangeModal(); saveToFirebase(); renderTable(); renderPublicTable(); updateChart();
+    }
+
+    // ----------------------------------------------------
+    // GRÁFICOS, BALANCEAMENTO E RELATÓRIOS
+    // ----------------------------------------------------
+    let balanceHoursOverride = {}; let balanceMaxLimit = {};
+    window.resetBalanceOverrides = function() { balanceHoursOverride = {}; balanceMaxLimit = {}; renderTable(); }
+    
+    function renderBalance(hoursMap) {
+        const balList = document.getElementById("balanceList"); balList.innerHTML = "";
+        for (let interp in hoursMap) {
+            let h = (balanceHoursOverride[interp] !== undefined) ? balanceHoursOverride[interp] : hoursMap[interp];
+            let maxLim = (balanceMaxLimit[interp] !== undefined) ? balanceMaxLimit[interp] : 40;
+            let minLim = Math.max(10, Math.round(maxLim * 0.5));
+            let sClass = "status-ok"; let sMsg = "Equilibrada";
+            if (h > maxLim) { sClass = "status-high"; sMsg = `⚠️ Sobrecarga (>${maxLim}h)`; } 
+            else if (h < minLim) { sClass = "status-low"; sMsg = `💡 Subutilizado (<${minLim}h)`; }
+
+            let c = document.createElement("div"); c.className = `balance-card ${sClass}`;
+            c.style.cssText = "display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 12px; border-radius: 6px;";
+            c.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                    <strong style="font-size: 14.5px;">${interp}</strong><span style="font-size: 12px; font-weight: bold; padding: 3px 8px; border-radius: 4px; background: rgba(255,255,255,0.8);">${sMsg}</span>
+                </div>
+                <div style="display: flex; gap: 10px; align-items: center; justify-content: space-between; font-size: 13px; margin-top: 4px;">
+                    <label style="display:flex; align-items:center; gap:5px; font-weight:500;">Alocado: <input type="number" step="0.5" value="${parseFloat(h).toFixed(1)}" style="width:60px; padding:4px;" onchange="updateBalanceHours('${interp}', this.value)"></label>
+                    <label style="display:flex; align-items:center; gap:5px; font-weight:500;">Teto: <input type="number" step="1" value="${maxLim}" style="width:50px; padding:4px;" onchange="updateBalanceMaxLimit('${interp}', this.value)"></label>
+                </div>`;
+            balList.appendChild(c);
+        }
+    }
+    window.updateBalanceHours = function(i, v) { let n = parseFloat(v); if(!isNaN(n) && n>=0) { balanceHoursOverride[i] = n; renderTable(); } }
+    window.updateBalanceMaxLimit = function(i, v) { let n = parseFloat(v); if(!isNaN(n) && n>0) { balanceMaxLimit[i] = n; renderTable(); } }
+
+    let myChart = null;
+    window.updateChart = function() {
+        if (!document.getElementById('demandChart')) return;
+        if (!myChart) {
+            myChart = new Chart(document.getElementById('demandChart').getContext('2d'), {
+                type: 'bar',
+                data: { labels: ['Atend.', 'Estudo', 'Plan.', 'Evento', 'Trad.', 'Disc.', 'Reunião', 'Projeto', 'Outros', 'Não Atend.', 'Substit.', 'Férias'], datasets: [{ label: 'Horas', data: [], backgroundColor: ['#D4EDDA', '#FFF3CD', '#FFE8D6', '#CCE5FF', '#E8D8F8', '#F8D7DA', '#D1E7DD', '#B8E2F2', '#E2E3E5', '#f5b7b1', '#fdebd0', '#d4e6f1'], borderWidth: 1 }] },
+                options: { scales: { y: { beginAtZero: true } }, plugins: { legend: { display: false } } }
+            });
+        }
+        let totals = { Atendimento: 0, Estudo: 0, Planejamento: 0, Evento: 0, Tradução: 0, Disciplinas: 0, Reunião: 0, Projeto: 0, Outros: 0, "Não Atendimento": 0, "Substituição": 0, "Férias": 0 };
+        for(let w=1; w<=4; w++){
+            if(!window.scheduleData[w]) continue;
+            for(let t in window.scheduleData[w]){
+                for(let i in window.scheduleData[w][t]){
+                    for(let d in window.scheduleData[w][t][i]){
+                        window.scheduleData[w][t][i][d].forEach(dem => { if(totals[dem.type] !== undefined) totals[dem.type] += parseFloat(dem.hours || 0); });
+                    }
+                }
+            }
+        }
+        myChart.data.datasets[0].data = [totals.Atendimento, totals.Estudo, totals.Planejamento, totals.Evento, totals.Tradução, totals.Disciplinas, totals.Reunião, totals.Projeto, totals.Outros, totals["Não Atendimento"], totals["Substituição"], totals["Férias"]];
+        myChart.update();
+    }
+
+    let reportChartInstance = null;
+    window.openMonthlyReportModal = function() {
+        let mText = document.getElementById("monthSelect").options[document.getElementById("monthSelect").selectedIndex].text;
+        let yText = document.getElementById("yearInput").value;
+        let filterSel = document.getElementById("reportInterpreterFilter");
+        if(filterSel.options.length <= 1) filterSel.innerHTML = `<option value="">Todos (Geral)</option>` + window.interpretes.map(i => `<option value="${i}">${i}</option>`).join('');
+        let selInterp = filterSel.value;
+        
+        document.getElementById("reportMonthTitle").innerText = selInterp ? `Relatório: ${selInterp} — ${mText} ${yText}` : `Relatório Consolidado — ${mText} ${yText}`;
+
+        let totHours = 0; let tyTot = { Atendimento:0, Estudo:0, Planejamento:0, Evento:0, Tradução:0, Disciplinas:0, Reunião:0, Projeto:0, Outros:0, "Não Atendimento":0, "Substituição":0, "Férias":0 };
+        let tyCnt = { Atendimento:0, Estudo:0, Planejamento:0, Evento:0, Tradução:0, Disciplinas:0, Reunião:0, Projeto:0, Outros:0, "Não Atendimento":0, "Substituição":0, "Férias":0 };
+        let evMap = new Map();
+
+        for (let w = 1; w <= 4; w++) {
+            if (!window.scheduleData[w]) continue;
+            turnos.forEach(t => { window.interpretes.forEach(i => {
+                if (selInterp && i !== selInterp) return;
+                dias.forEach((d, dIdx) => {
+                    let cDate = new Date(window.baseStartDate); cDate.setDate(cDate.getDate() + ((w-1)*7) + dIdx);
+                    let dFmt = cDate.toLocaleDateString('pt-BR');
+                    let dems = (window.scheduleData[w][t] && window.scheduleData[w][t][i]) ? window.scheduleData[w][t][i][d] || [] : [];
+                    dems.forEach(dem => {
+                        if (dem.detail || dem.type) {
+                            let tmArr = [i, dem.pair, dem.trio].filter(Boolean).sort();
+                            let key = `${dFmt}|${t}|${dem.type}|${dem.detail}|${tmArr.join(",")}|${dem.startTime}-${dem.endTime}`;
+                            if (!evMap.has(key)) {
+                                evMap.set(key, { week:w, date:dFmt, dObj:cDate, turno:t.split(' ')[0], type:dem.type||'Outros', detail:dem.detail||'Sem nome', obs:dem.obs||'', just:dem.justification||'', team:tmArr.join(", "), loc:dem.location||'-', time:`${dem.startTime||''} - ${dem.endTime||''}`, hours:dem.hours?parseFloat(dem.hours):0 });
+                            }
+                        }
+                    });
+                });
+            });});
+        }
+
+        let aggMap = new Map();
+        evMap.forEach((ev) => {
+            let aKey = `${ev.type}|${ev.detail}|${ev.team}|${ev.loc}|${ev.time}`;
+            if (!aggMap.has(aKey)) aggMap.set(aKey, { dates:[ev.date], dObjs:[ev.dObj], wks:new Set([ev.week]), trns:new Set([ev.turno]), type:ev.type, detail:ev.detail, obs:new Set(ev.obs?[ev.obs]:[]), just:new Set(ev.just?[ev.just]:[]), team:ev.team, loc:ev.loc, time:ev.time, tHrs:ev.hours, occ:1 });
+            else {
+                let a = aggMap.get(aKey);
+                if (!a.dates.includes(ev.date)) { a.dates.push(ev.date); a.dObjs.push(ev.dObj); }
+                a.wks.add(ev.week); a.trns.add(ev.turno); if (ev.obs) a.obs.add(ev.obs); if (ev.just) a.just.add(ev.just); a.tHrs+=ev.hours; a.occ+=1;
+            }
+        });
+
+        aggMap.forEach(a => {
+            totHours += a.tHrs;
+            if (tyTot[a.type] !== undefined) { tyTot[a.type] += a.tHrs; tyCnt[a.type] += a.occ; }
+        });
+
+        let sCards = `<div style="background:#e8f4f8; padding:10px; border-radius:6px; text-align:center;"><b>Total</b><h3 style="margin:5px 0 0 0; color:var(--primary);">${totHours.toFixed(1)}h</h3></div>`;
+        for (let t in tyTot) {
+            let bg = t==='Atendimento'?'var(--atendimento)':t==='Estudo'?'var(--estudo)':t==='Férias'?'var(--ferias)':t==='Não Atendimento'?'#f5b7b1':'#eee';
+            sCards += `<div style="background:${bg}; padding:10px; border-radius:6px; text-align:center; border:1px solid #ddd;"><b>${t}</b><h3 style="margin:5px 0 0 0;">${tyTot[t].toFixed(1)}h <small style="font-size:11px;">(${tyCnt[t]}x)</small></h3></div>`;
+        }
+        document.getElementById("reportSummaryCards").innerHTML = sCards;
+
+        let tb = document.getElementById("reportTableBody"); tb.innerHTML = "";
+        let aArr = Array.from(aggMap.values()).sort((a,b) => Math.min(...a.dObjs) - Math.min(...b.dObjs));
+        if (aArr.length === 0) tb.innerHTML = `<tr><td colspan="9" style="text-align:center;">Sem demandas.</td></tr>`;
+        else {
+            aArr.forEach((i, idx) => {
+                let r = document.createElement("tr"); r.style.background = idx%2===0?"#fff":"#f9fafb";
+                let obsS = Array.from(i.obs).map(o=>`📝 ${formatTextWithLinks(o)}`).join('<br>');
+                let justS = Array.from(i.just).map(j=>`🌴 <b>Just:</b> ${formatTextWithLinks(j)}`).join('<br>');
+                r.innerHTML = `<td style="padding:6px; font-size:12px; text-align:center;">${i.dates.join('<br>')}</td><td style="padding:6px; font-size:12px; text-align:center;">${Array.from(i.wks).map(w=>`S${w}`).join('<br>')}</td><td style="padding:6px; font-size:12px; text-align:center;">${Array.from(i.trns).join('<br>')}</td><td style="padding:6px; font-size:11px; text-align:center; font-weight:bold;">${i.type}</td><td style="padding:6px;"><b>${i.detail}</b>${justS?`<div style="font-size:11px; color:#2980b9;">${justS}</div>`:''}${obsS?`<div style="font-size:11px; color:#666;">${obsS}</div>`:''}${i.occ>1?`<div style="font-size:11px; color:var(--primary);">🔄 ${i.occ}x</div>`:''}</td><td style="padding:6px; font-size:12px;">${i.team}</td><td style="padding:6px; font-size:12px; text-align:center;">${i.loc}</td><td style="padding:6px; font-size:12px; text-align:center;">${i.time}</td><td style="padding:6px; font-size:13px; font-weight:bold; text-align:center;">${i.tHrs.toFixed(1)}h</td>`;
+                tb.appendChild(r);
+            });
+        }
+
+        if (reportChartInstance) reportChartInstance.destroy();
+        reportChartInstance = new Chart(document.getElementById("reportChart").getContext("2d"), {
+            type: 'doughnut',
+            data: { labels: Object.keys(tyTot), datasets: [{ data: Object.values(tyTot), backgroundColor: ['#D4EDDA', '#FFF3CD', '#FFE8D6', '#CCE5FF', '#E8D8F8', '#F8D7DA', '#D1E7DD', '#B8E2F2', '#E2E3E5', '#f5b7b1', '#fdebd0', '#d4e6f1'] }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
+        });
+        document.getElementById("reportModalOverlay").style.display = "flex";
+    }
+    window.closeMonthlyReportModal = function() { document.getElementById("reportModalOverlay").style.display = "none"; }
+    window.printMonthlyReport = function() { document.body.classList.add("printing-report"); window.print(); document.body.classList.remove("printing-report"); }
+
+    // ----------------------------------------------------
+    // EXPORTAÇÕES (EXCEL E ICS)
+    // ----------------------------------------------------
+    window.exportToExcel = function() {
+        let dRows = [["UFRN"],["SIA - Escala Semanal - Semana " + currentWeek],[],["DATA", "DIA", "TIPO", "DESCRIÇÃO", "LOCAL", "TILS", "INÍCIO", "TÉRMINO", "HORAS"]];
+        dias.forEach((d, dIdx) => {
+            let cDate = new Date(window.baseStartDate); cDate.setDate(cDate.getDate() + ((currentWeek-1)*7) + dIdx);
+            turnos.forEach(t => { window.interpretes.forEach(i => {
+                let dems = (window.scheduleData[currentWeek] && window.scheduleData[currentWeek][t] && window.scheduleData[currentWeek][t][i]) ? window.scheduleData[currentWeek][t][i][d] || [] : [];
+                dems.forEach(dem => {
+                    if (dem.detail || dem.type) dRows.push([cDate.toLocaleDateString('pt-BR'), d, dem.type||"", dem.detail||"", dem.location||"", [i,dem.pair,dem.trio].filter(Boolean).join(", "), dem.startTime||"", dem.endTime||"", dem.hours?parseFloat(dem.hours):0]);
+                });
+            });});
+        });
+        let ws = XLSX.utils.aoa_to_sheet(dRows); let wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, `Semana_${currentWeek}`); XLSX.writeFile(wb, `escala_sem_${currentWeek}.xlsx`);
+    }
+
+    window.exportToGoogleCalendar = function() {
+        let ics = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//SIA UFRN//PT-BR","CALSCALE:GREGORIAN","METHOD:PUBLISH"];
+        let hasEv = false;
+        for (let w=1; w<=4; w++) {
+            if (!window.scheduleData[w]) continue;
+            turnos.forEach(t => { window.interpretes.forEach(i => { dias.forEach((d, dIdx) => {
+                let cDate = new Date(window.baseStartDate); cDate.setDate(cDate.getDate() + ((w-1)*7) + dIdx);
+                let dems = (window.scheduleData[w] && window.scheduleData[w][t] && window.scheduleData[w][t][i]) ? window.scheduleData[w][t][i][d] || [] : [];
+                dems.forEach(dem => {
+                    if (dem.detail || dem.type) {
+                        hasEv = true;
+                        let dF = `${cDate.getFullYear()}${String(cDate.getMonth()+1).padStart(2,'0')}${String(cDate.getDate()).padStart(2,'0')}`;
+                        let dtStart = `${dF}T${(dem.startTime||"08:00").replace(":","")}00`;
+                        let dtEnd = `${dF}T${(dem.endTime||"12:00").replace(":","")}00`;
+                        ics.push("BEGIN:VEVENT", `UID:ev-${w}-${dIdx}-${Math.random().toString(36).substring(2,9)}`, `DTSTAMP:${dF}T000000Z`, `DTSTART:${dtStart}`, `DTEND:${dtEnd}`, `SUMMARY:[Libras] ${dem.detail||dem.type}`, `DESCRIPTION:Tipo: ${dem.type}\\nEquipe: ${[i,dem.pair,dem.trio].filter(Boolean).join(', ')}`, dem.location?`LOCATION:${dem.location}`:'', "END:VEVENT");
+                    }
+                });
+            });});});
+        }
+        if (!hasEv) return alert("Nenhuma demanda encontrada!");
+        ics.push("END:VCALENDAR");
+        let link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([ics.join("\r\n")], { type: "text/calendar;charset=utf-8" }));
+        link.download = `escala_ufrn.ics`; document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    }
+
+    // PDF 
+    window.openPdfModal = function() {
+        let p = document.getElementById("filterInterpretersList"); p.innerHTML = "";
+        window.interpretes.forEach((name, idx) => { p.innerHTML += `<label><input type="checkbox" id="chk-interp-${idx}" checked> ${name}</label>`; });
+        document.getElementById("pdfModalOverlay").style.display = "flex";
+    }
+    window.closePdfModal = function() { document.getElementById("pdfModalOverlay").style.display = "none"; }
+    window.generateCustomPdf = function() {
+        document.querySelectorAll(".pdf-hidden").forEach(el => el.classList.remove("pdf-hidden"));
+        if (!document.getElementById("chk-col-hours").checked) { document.getElementById("col-head-hours").classList.add("pdf-hidden"); document.querySelectorAll(".col-hours-cell").forEach(c => c.classList.add("pdf-hidden")); }
+        dias.forEach(d => { if (!document.getElementById(`chk-col-${d}`).checked) { document.getElementById(`col-head-${d}`).classList.add("pdf-hidden"); document.querySelectorAll(`.col-day-${d}`).forEach(c => c.classList.add("pdf-hidden")); } });
+        ["manha", "tarde", "noite"].forEach(t => { if (!document.getElementById(`chk-turno-${t}`).checked) document.querySelectorAll(`.row-turno-${t}`).forEach(r => r.classList.add("pdf-hidden")); });
+        window.interpretes.forEach((_, idx) => { if (!document.getElementById(`chk-interp-${idx}`).checked) document.querySelectorAll(`.row-interp-${idx}`).forEach(r => r.classList.add("pdf-hidden")); });
+        closePdfModal(); window.print();
+    }
+
+</script>
+</body>
+</html>
